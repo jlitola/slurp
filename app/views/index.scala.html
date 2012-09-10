@@ -1,0 +1,15 @@
+@(message: String)
+
+@main("Welcome to Play 2.0") {
+    
+<div id="stream"></div>
+
+<script type="text/javascript">
+    window.message = function(data) {
+        $('#stream').prepend("<p>"+data+"</p>");
+        $('#stream p:nth-child(20)').remove();
+    };
+</script>
+
+<iframe src="@routes.Application.statusStream" style="display:none"/>
+}
