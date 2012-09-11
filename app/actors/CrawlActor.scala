@@ -60,12 +60,10 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
         val res = CrawlResult(url, status, duration, r.body.size, findLinks(r.body, baseURL = Some(url)))
         Logger.info("Finished crawling url %s in %dms with %s" format(url, duration, self))
         targets foreach (_ ! res)
-        context.stop(self)
       } catch {
         case e@_ =>
           val res = CrawlResult(url, 999, System.currentTimeMillis() - start, 0, Seq.empty)
           targets foreach (_ ! res)
-          context.stop(self)
       }
   }
 }
@@ -83,6 +81,9 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var pending = HashSet.empty[URL]
   var active = Seq.empty[URL]
   var visited = Map.empty[URL, Long]
+  lazy val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics))
+    .withRouter(new SmallestMailboxRouter(concurrency))
+    .withDispatcher("play.akka.actor.crawler-dispatcher"), name="crawler")
 
   def receive = {
     case LinksFound(urls) =>
@@ -108,7 +109,6 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
         val url = pending.head
         pending = pending.drop(1)
         Logger.info("Site %s launching crawl from pending for %s with %s" format (site, url, self))
-        val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics)).withDispatcher("play.akka.actor.crawler-dispatcher"))
         crawler ! new CrawlRequest(url)
         active = active :+ url
       } else if (active.isEmpty) {
@@ -119,9 +119,8 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
   def addUrl(url : URL) {
     if (! visited.contains(url) && ! active.contains(url) )
-      if (active.size < concurrency) {
+      if (active.size < 3*concurrency) { // Keeping actors fed with messages so that they can process next message immediately
         Logger.info("Site %s launching crawl for %s with %s" format (site, url, self))
-        val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics)).withDispatcher("play.akka.actor.crawler-dispatcher"))
         crawler ! new CrawlRequest(url)
         active = active :+ url
       } else {
