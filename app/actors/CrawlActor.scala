@@ -14,6 +14,7 @@ import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
 import scala.actors.threadpool.TimeUnit
 import akka.dispatch.Await
+import util.RobotsExclusion
 
 /**
  */
@@ -82,9 +83,12 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var active = Seq.empty[URL]
   var visited = Map.empty[URL, Long]
   var stopping = false
+  lazy val robots : RobotsExclusion = fetchRobots()
+
   lazy val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics))
     .withRouter(new SmallestMailboxRouter(concurrency))
     .withDispatcher("play.akka.actor.crawler-dispatcher"), name="crawler")
+
 
   def receive = {
     case LinksFound(urls) =>
@@ -128,16 +132,33 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     case msg @ _ => Logger.warn("Unknown message! "+msg)
   }
 
-  def addUrl(url : URL) {
-    if (! visited.contains(url) && ! active.contains(url) )
-      if (active.size < 3*concurrency) { // Keeping actors fed with messages so that they can process next message immediately
-        Logger.info("Site %s launching crawl for %s with %s" format (site, url, self))
-        crawler ! new CrawlRequest(url)
-        active = active :+ url
-      } else {
-        pending = pending + url
-      }
+  def fetchRobots() : RobotsExclusion = {
+    val url = "http://" + site + "/robots.txt"
+    try {
+      Logger.info("Fetching robot exclusion from %s" format(url))
+      RobotsExclusion(WS.url(url).get().await(5000).get.body, "Crawler")
+    } catch {
+      case _ =>
+        Logger.info("Failed to fetch robot exclusion from %s" format (url))
+        new RobotsExclusion(Seq.empty)
+    }
   }
+
+  def addUrl(url : URL) {
+    if (! visited.contains(url) && ! active.contains(url))
+      if (robots.allow(url.getFile)) {
+        if (active.size < 3 * concurrency) {
+          // Keeping actors fed with messages so that they can process next message immediately
+          Logger.info("Site %s launching crawl for %s with %s" format(site, url, self))
+          crawler ! new CrawlRequest(url)
+          active = active :+ url
+        } else {
+          pending = pending + url
+        }
+      } else {
+        Logger.info("Skipped url %s due robots.txt" format (url))
+      }
+    }
 }
 
 

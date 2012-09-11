@@ -3,8 +3,18 @@ import org.specs2.mutable._
 
 import play.api.test._
 import play.api.test.Helpers._
-import util.LinkUtility
+import org.specs2.specification.Scope
+import util.{RobotsExclusion, LinkUtility}
 import java.net.URL
+
+trait robots extends Scope {
+  val rule = """User-agent: *
+Disallow: /private
+
+User-agent: Crawler
+Disallow: /nocrawler"""
+  val robot = Robots(rule, "Crawler")
+}
 
 class UtilitySpec extends Specification  {
   "LinkUtility.findLinks" should {
@@ -29,6 +39,17 @@ class UtilitySpec extends Specification  {
       val links = LinkUtility.findLinks("""<a href="/foo">Link</a>""", baseURL = Some(baseUrl))
       links must have size(1)
       links.head.toString mustEqual """http://foo.com/foo"""
+    }
+  }
+
+  "RobotsExclusion" should {
+    "be able to parse robots.txt" in new robots {
+      robot must haveClass[Robots]
+    }
+    "allow access based on rules" in new robots {
+      robot.allow("/anything") must beTrue
+      robot.allow("/nocrawler/") must beFalse
+      robot.allow("/private/") must beFalse
     }
   }
 }
