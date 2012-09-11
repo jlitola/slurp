@@ -211,9 +211,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
         pending -= newSite
         Logger.info("Initiating site crawl for "+site)
-        val actor = context.actorOf(Props(new SiteActor(newSite)))
-        active.put(newSite, actor)
-        actor ! LinksFound(urls.toSeq)
+        launchSiteActor(newSite, urls.toSeq)
       }
 
     case ManagerStatisticsRequest() =>
@@ -235,13 +233,17 @@ class CrawlManager(val concurrency : Int) extends Actor {
           if (active.size < concurrency) {
             Logger.info("Creating new site actor for "+site)
 
-            val actor = context.actorOf(Props(new SiteActor(site)))
-            active.put(site, actor)
-            actor ! LinksFound(siteUrls)
+            launchSiteActor(site, siteUrls)
           } else
             pending.put(site, pending.get(site).getOrElse(HashSet.empty[URL]) ++ siteUrls)
       }
     }
+  }
+  def launchSiteActor(site : String, urls : Seq[URL]) {
+    val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.crawler-dispatcher"))
+    active.put(site, actor)
+    actor ! LinksFound(urls)
+
   }
 }
 
