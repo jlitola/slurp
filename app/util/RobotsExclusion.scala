@@ -5,7 +5,6 @@ import play.api.Logger
 class RobotsExclusion(val forbidden : Seq[String]) {
   def allow(path : String) : Boolean = {
     val p = if (path.isEmpty()) "/" else path
-    Logger.info("Checking allow for "+p)
     ! forbidden.exists(p.startsWith(_))
   }
 }

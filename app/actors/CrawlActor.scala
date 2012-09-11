@@ -135,11 +135,9 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   def fetchRobots() : RobotsExclusion = {
     val url = "http://" + site + "/robots.txt"
     try {
-      Logger.info("Fetching robot exclusion from %s" format(url))
       RobotsExclusion(WS.url(url).get().await(5000).get.body, "Crawler")
     } catch {
       case _ =>
-        Logger.info("Failed to fetch robot exclusion from %s" format (url))
         new RobotsExclusion(Seq.empty)
     }
   }
@@ -280,7 +278,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
 object CrawlManager {
   lazy val system = Akka.system
-  lazy val ref = system.actorOf(Props(new CrawlManager(100)).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
+  lazy val ref = system.actorOf(Props(new CrawlManager(150)).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
 
   Akka.system.scheduler.schedule(0 seconds, 10 seconds, statistics, CrawlStatisticsRequest())
