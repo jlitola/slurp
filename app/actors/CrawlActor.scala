@@ -12,9 +12,8 @@ import play.api.libs.iteratee.{Enumerator, PushEnumerator}
 import util.LinkUtility.findLinks
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
-import scala.actors.threadpool.TimeUnit
-import akka.dispatch.Await
 import util.RobotsExclusion
+import crawler.Global.redis
 
 /**
  */
@@ -50,6 +49,10 @@ case class Stop()
 class CrawlActor(statsActor : ActorRef) extends Actor {
   def receive = {
     case CrawlRequest(url) =>
+
+      redis.withClient { r =>
+        r.incr("urls")
+      }
       Logger.info("Crawling url "+url+" with "+self)
       val targets = Seq(sender, statsActor)
       val start = System.currentTimeMillis();
@@ -81,7 +84,6 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
 class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var pending = HashSet.empty[URL]
   var active = Seq.empty[URL]
-  var visited = Map.empty[URL, Long]
   var stopping = false
   lazy val robots : RobotsExclusion = fetchRobots()
 
@@ -99,15 +101,19 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
     case CrawlResult(url, status, duration, size, links) =>
       active = active.filterNot(_ equals url)
-      visited = visited + (url -> System.currentTimeMillis())
+      redis.withClient {
+        r =>
+          r.zadd("visited:" + site, System.currentTimeMillis, url.toString())
+          val (local, other) = links.partition(site equals _.getHost)
 
-      val (local, other) = links.partition(site equals _.getHost)
+          CrawlManager.ref ! LinksFound(other.distinct)
 
-      CrawlManager.ref ! LinksFound(other.distinct)
+          val newLinks = local.filterNot({
+            u => r.zrank("visited:" + site, u.toString).isEmpty
+          }).distinct
 
-      val newLinks = local.filterNot( visited.contains(_) ).distinct
-
-      pending = pending ++ newLinks
+          pending = pending ++ newLinks
+      }
 
       if (pending.nonEmpty) {
         val url = pending.head
@@ -142,21 +148,24 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     }
   }
 
-  def addUrl(url : URL) {
-    if (! visited.contains(url) && ! active.contains(url))
-      if (robots.allow(url.getFile)) {
-        if (active.size < 3 * concurrency) {
-          // Keeping actors fed with messages so that they can process next message immediately
-          Logger.info("Site %s launching crawl for %s with %s" format(site, url, self))
-          crawler ! new CrawlRequest(url)
-          active = active :+ url
-        } else {
-          pending = pending + url
-        }
-      } else {
-        Logger.info("Skipped url %s due robots.txt" format (url))
-      }
+  def addUrl(url: URL) {
+    redis.withClient {
+      r =>
+        if (r.zrank("visited:"+site, url.toString).isEmpty && !active.contains(url))
+          if (robots.allow(url.getFile)) {
+            if (active.size < 3 * concurrency) {
+              // Keeping actors fed with messages so that they can process next message immediately
+              Logger.info("Site %s launching crawl for %s with %s" format(site, url, self))
+              crawler ! new CrawlRequest(url)
+              active = active :+ url
+            } else {
+              pending = pending + url
+            }
+          } else {
+            Logger.info("Skipped url %s due robots.txt" format (url))
+          }
     }
+  }
 }
 
 
