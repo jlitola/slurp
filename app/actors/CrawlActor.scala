@@ -81,6 +81,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var pending = HashSet.empty[URL]
   var active = Seq.empty[URL]
   var visited = Map.empty[URL, Long]
+  var stopping = false
   lazy val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics))
     .withRouter(new SmallestMailboxRouter(concurrency))
     .withDispatcher("play.akka.actor.crawler-dispatcher"), name="crawler")
@@ -103,7 +104,6 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       val newLinks = local.filterNot( visited.contains(_) ).distinct
 
       pending = pending ++ newLinks
-      Logger.info("We have %d new links, pending size is %d" format (newLinks.size, pending.size))
 
       if (pending.nonEmpty) {
         val url = pending.head
@@ -112,9 +112,20 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
         crawler ! new CrawlRequest(url)
         active = active :+ url
       } else if (active.isEmpty) {
-        CrawlManager.ref ! SiteCrawlFinished(site)
+        if (stopping) {
+          context.stop(self)
+        } else
+          CrawlManager.ref ! SiteCrawlFinished(site)
       }
-    case msg @ _ => Logger.info("Unknown message! "+msg)
+
+    case Stop() =>
+      stopping = true
+      if (active.isEmpty && pending.isEmpty) {
+        context.stop(self)
+      }
+
+
+    case msg @ _ => Logger.warn("Unknown message! "+msg)
   }
 
   def addUrl(url : URL) {
@@ -216,7 +227,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
     case ManagerStatisticsRequest() =>
       sender ! ManagerStatistics(active.size, pending.size)
 
-    case msg @ _ => Logger.info("Unknown message! "+msg)
+    case msg @ _ => Logger.warn("Unknown message! "+msg)
 
   }
 
