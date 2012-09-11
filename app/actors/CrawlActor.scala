@@ -34,7 +34,7 @@ case class LinksFound(urls: Seq[URL])
 /// Request for Crawl statistics
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
-case class CrawlStatistics(total: Int, success : Int, failed : Int, running : Long)
+case class CrawlStatistics(total: Int, success : Int, failed : Int, running : Long, bytes : Long)
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
@@ -175,6 +175,7 @@ class CrawlStatisticsActor extends Actor {
   var bytes : Long = 0
   val start = System.currentTimeMillis()
   var listeners = Seq.empty[PushEnumerator[String]]
+  var lastStats = CrawlStatistics(0,0,0, System.currentTimeMillis(),0)
 
   Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
 
@@ -194,6 +195,7 @@ class CrawlStatisticsActor extends Actor {
     case CrawlStatisticsRequest() =>
       Logger.info("Received statistics request")
       listeners.foreach(_.push(statsHtml.toString))
+      lastStats = CrawlStatistics(total, success, failed, System.currentTimeMillis(), bytes)
 
     case ManagerStatistics(t, p) => totalSites = t; pendingSites = p
 
@@ -211,10 +213,11 @@ class CrawlStatisticsActor extends Actor {
   }
 
   def statsHtml = {
-    val duration = (System.currentTimeMillis()-start)/1000.0
+    val fromStart = (System.currentTimeMillis()-start)/1000.0
+    val fromLast = (System.currentTimeMillis()-lastStats.running)/1000.0
     "<pre>" +
-      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, duration, bytes/1024.0)) +
-      ("delta crawls: total %.2f 1/s, %.2f kBs" format (total/duration, bytes/duration/1024.0)) +
+      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, fromStart, bytes/1024.0)) +
+      ("delta crawls: total %.2f 1/s, %.2f kBs" format ((total-lastStats.total)/fromLast, (bytes-lastStats.bytes)/fromLast/1024.0)) +
     "</pre>"
   }
 
@@ -241,8 +244,8 @@ class CrawlManager(val concurrency : Int) extends Actor {
       active.remove(site) map ( _ ! Stop())
       redis.withClient { r =>
         r.spop("observed_sites").foreach { newSite : String =>
-          r.lrange("observed:"+newSite, 0, -1) map { urls =>
-            launchSiteActor(newSite, urls.flatMap { url => url.map(new URL(_))})
+          r.smembers("observed:"+newSite) map { urls =>
+            launchSiteActor(newSite, urls.flatMap { url => url.map(new URL(_))}.toSeq)
           }
         }
       }
@@ -272,7 +275,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
           } else
             redis.withClient { r=>
               r.sadd("observed_sites", site)
-              r.lpush("observed:"+site, siteUrls.head, siteUrls.drop(1) : _*)
+              r.sadd("observed:"+site, siteUrls.head, siteUrls.drop(1) : _*)
             }
       }
     }
@@ -290,7 +293,7 @@ object CrawlManager {
   lazy val ref = system.actorOf(Props(new CrawlManager(150)).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
 
-  Akka.system.scheduler.schedule(0 seconds, 10 seconds, statistics, CrawlStatisticsRequest())
+  Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
   val listener = system.actorOf(Props(new Actor {
     def receive = {
