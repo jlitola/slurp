@@ -204,7 +204,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
     case SiteCrawlFinished(site) =>
       Logger.info("Finished site crawl for "+site+ ", pending sites " + pending.size)
-      active.remove(site) map (context.stop(_))
+      active.remove(site) map ( _ ! Stop())
       pending.headOption foreach { k =>
         val (newSite, urls) = (k._1, k._2)
 
