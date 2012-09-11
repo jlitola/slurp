@@ -1,6 +1,8 @@
 package util
 
 import java.net.{MalformedURLException, URL}
+import play.api.Play.current
+import play.api.Logger
 
 object LinkUtility {
   val LinkPattern = """(?s)(<a[^>]*>)""".r
@@ -28,6 +30,6 @@ object LinkUtility {
         }
       case _ => None
     }
-    res.toSeq.distinct
+    res.toSeq
   }
 }
