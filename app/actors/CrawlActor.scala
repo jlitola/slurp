@@ -49,10 +49,6 @@ case class Stop()
 class CrawlActor(statsActor : ActorRef) extends Actor {
   def receive = {
     case CrawlRequest(url) =>
-
-      redis.withClient { r =>
-        r.incr("urls")
-      }
       Logger.info("Crawling url "+url+" with "+self)
       val targets = Seq(sender, statsActor)
       val start = System.currentTimeMillis();
@@ -231,7 +227,6 @@ class CrawlStatisticsActor extends Actor {
  */
 class CrawlManager(val concurrency : Int) extends Actor {
   val active : mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
-  val pending : mutable.HashMap[String, HashSet[URL]] = mutable.HashMap.empty
 
   def receive = {
     case LinksFound(urls) =>
@@ -242,18 +237,20 @@ class CrawlManager(val concurrency : Int) extends Actor {
       registerLink(Seq(new URL(url)))
 
     case SiteCrawlFinished(site) =>
-      Logger.info("Finished site crawl for "+site+ ", pending sites " + pending.size)
+      Logger.info("Finished site crawl for "+site)
       active.remove(site) map ( _ ! Stop())
-      pending.headOption foreach { k =>
-        val (newSite, urls) = (k._1, k._2)
-
-        pending -= newSite
-        Logger.info("Initiating site crawl for "+site)
-        launchSiteActor(newSite, urls.toSeq)
+      redis.withClient { r =>
+        r.spop("observed_sites").foreach { newSite : String =>
+          r.lrange("observed:"+newSite, 0, -1) map { urls =>
+            launchSiteActor(newSite, urls.flatMap { url => url.map(new URL(_))})
+          }
+        }
       }
 
     case ManagerStatisticsRequest() =>
-      sender ! ManagerStatistics(active.size, pending.size)
+      redis.withClient { r =>
+        sender ! ManagerStatistics(active.size, r.scard("observed_sites").getOrElse(0))
+      }
 
     case msg @ _ => Logger.warn("Unknown message! "+msg)
 
@@ -273,7 +270,10 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
             launchSiteActor(site, siteUrls)
           } else
-            pending.put(site, pending.get(site).getOrElse(HashSet.empty[URL]) ++ siteUrls)
+            redis.withClient { r=>
+              r.sadd("observed_sites", site)
+              r.lpush("observed:"+site, siteUrls.head, siteUrls.drop(1) : _*)
+            }
       }
     }
   }
