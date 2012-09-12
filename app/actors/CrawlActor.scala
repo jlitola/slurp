@@ -1,14 +1,14 @@
 package actors
 
 import akka.actor._
-import play.api.libs.ws.{Response, WS}
+import play.api.libs.ws._
 import play.api.libs.concurrent.Akka
 import play.api.Play.current
 import akka.util.duration._
 import play.api.Logger
 import collection._
 import immutable.HashSet
-import play.api.libs.iteratee.{Enumerator, PushEnumerator}
+import play.api.libs.iteratee._
 import util.LinkUtility.findLinks
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
@@ -40,6 +40,8 @@ case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
 
 case class Stop()
+
+
 /**
  * Class for crawling individual urls.
  *
@@ -53,11 +55,30 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
       val targets = Seq(sender, statsActor)
       val start = System.currentTimeMillis();
       try {
-        val r = WS.url(url.toString).get().await(10000).get
-        val status = r.status
+        var status = 999;
+        var size = 0
+        val byteToLine = new Object() {
+          var remaining = ""
+
+          def apply(bytes: Array[Byte]) : Seq[String] = {
+            val lines = (remaining + new String(bytes)).split("\n")
+            remaining = lines.last
+            lines.dropRight(1)
+          }
+        }
+
+        val hp = WS.url(url.toString).get{ response =>
+          status = response.status
+          Enumeratee.map[Array[Byte]] { byteToLine(_)} &>>
+          Iteratee.fold[Seq[String], Seq[URL]](Seq.empty) { (urls, lines) =>
+            urls ++ (lines flatMap(findLinks(_, Some(url))))
+          }
+        }
+        val links = hp.map(_.run).await.get.await.get
+
         val duration = System.currentTimeMillis() - start
 
-        val res = CrawlResult(url, status, duration, r.body.size, findLinks(r.body, baseURL = Some(url)))
+        val res = CrawlResult(url, status, duration, size, links)
         Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
         targets foreach (_ ! res)
       } catch {
