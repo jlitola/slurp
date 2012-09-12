@@ -260,9 +260,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   def registerLink(urls : Seq[URL]) {
-    val bySite = urls groupBy (_.getHost)
-
-    bySite foreach { a =>
+    urls groupBy (_.getHost) foreach { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
