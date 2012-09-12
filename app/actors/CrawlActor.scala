@@ -105,23 +105,29 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
           CrawlManager.ref ! LinksFound(other.distinct)
 
-          if (local.nonEmpty) r.sadd(PENDING_KEY, local.head, local.drop(1): _*)
+          val newLinks = local.filterNot({
+            u => r.zrank(VISITED_KEY, u.toString).isEmpty
+          }).distinct
+
+          if (newLinks.nonEmpty) r.sadd(PENDING_KEY, newLinks.head, newLinks.drop(1): _*)
 
           var done = false
           var launched = false
+          Logger.info("Popping url from "+PENDING_KEY)
+          val pstart = System.currentTimeMillis()
           do {
             r.spop(PENDING_KEY) match {
-              case Some(urlString) if r.zrank(VISITED_KEY, urlString).isEmpty =>
+              case Some(urlString) =>
                 val url = new URL(urlString)
-                Logger.debug("Site %s launching crawl from pending for %s with %s" format(site, url, self))
-                crawler ! new CrawlRequest(url)
-                active = active :+ url
-                done = true
-                launched = true
-              case _ => done = true
+                if (addUrl(url)) {
+                  done = true
+                  launched = true
+                }
+              case None => done = true
             }
           } while (!done)
 
+          Logger.info("popping done, took "+(System.currentTimeMillis()-pstart))
           if (!launched && active.isEmpty) {
             if (stopping) {
               context.stop(self)
@@ -154,7 +160,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     }
   }
 
-  def addUrl(url: URL) {
+  def addUrl(url: URL) : Boolean = {
     redis.withClient {
       r =>
         if (r.zrank(VISITED_KEY, url.toString).isEmpty && !active.contains(url))
@@ -164,12 +170,13 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
               Logger.debug("Site %s launching crawl for %s with %s" format(site, url, self))
               crawler ! new CrawlRequest(url)
               active = active :+ url
+              true
             } else {
               r.sadd(PENDING_KEY, url)
+              true
             }
-          } else {
-            Logger.debug("Skipped url %s due robots.txt" format (url))
-          }
+          } else false
+        else false
     }
   }
 }
