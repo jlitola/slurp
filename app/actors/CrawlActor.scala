@@ -49,7 +49,7 @@ case class Stop()
 class CrawlActor(statsActor : ActorRef) extends Actor {
   def receive = {
     case CrawlRequest(url) =>
-      Logger.info("Crawling url "+url+" with "+self)
+      Logger.debug("Crawling url "+url+" with "+self)
       val targets = Seq(sender, statsActor)
       val start = System.currentTimeMillis();
       try {
@@ -58,7 +58,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
         val duration = System.currentTimeMillis() - start
 
         val res = CrawlResult(url, status, duration, r.body.size, findLinks(r.body, baseURL = Some(url)))
-        Logger.info("Finished crawling url %s in %dms with %s" format(url, duration, self))
+        Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
         targets foreach (_ ! res)
       } catch {
         case e@_ =>
@@ -114,7 +114,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       if (pending.nonEmpty) {
         val url = pending.head
         pending = pending.drop(1)
-        Logger.info("Site %s launching crawl from pending for %s with %s" format (site, url, self))
+        Logger.debug("Site %s launching crawl from pending for %s with %s" format (site, url, self))
         crawler ! new CrawlRequest(url)
         active = active :+ url
       } else if (active.isEmpty) {
@@ -151,14 +151,14 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
           if (robots.allow(url.getFile)) {
             if (active.size < 3 * concurrency) {
               // Keeping actors fed with messages so that they can process next message immediately
-              Logger.info("Site %s launching crawl for %s with %s" format(site, url, self))
+              Logger.debug("Site %s launching crawl for %s with %s" format(site, url, self))
               crawler ! new CrawlRequest(url)
               active = active :+ url
             } else {
               pending = pending + url
             }
           } else {
-            Logger.info("Skipped url %s due robots.txt" format (url))
+            Logger.debug("Skipped url %s due robots.txt" format (url))
           }
     }
   }
@@ -193,7 +193,7 @@ class CrawlStatisticsActor extends Actor {
       }
 
     case CrawlStatisticsRequest() =>
-      Logger.info("Received statistics request")
+      Logger.debug("Received statistics request")
       listeners.foreach(_.push(statsHtml.toString))
       lastStats = CrawlStatistics(total, success, failed, System.currentTimeMillis(), bytes)
 
@@ -236,7 +236,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
       registerLink(urls)
 
     case FeedUrl(url) =>
-      Logger.info("Feeded system with url "+url)
+      Logger.debug("Feeded system with url "+url)
       registerLink(Seq(new URL(url)))
 
     case SiteCrawlFinished(site) =>
@@ -269,7 +269,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
         case Some(actor) => actor ! LinksFound(siteUrls)
         case None =>
           if (active.size < concurrency) {
-            Logger.info("Creating new site actor for "+site)
+            Logger.debug("Creating new site actor for "+site)
 
             launchSiteActor(site, siteUrls)
           } else
