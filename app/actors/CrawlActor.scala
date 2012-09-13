@@ -12,10 +12,11 @@ import play.api.libs.iteratee._
 import util.LinkUtility.findLinks
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
-import util.RobotsExclusion
+import util.{LinkUtility, RobotsExclusion}
 import crawler.Global.redis
 import com.redis.RedisClient
 import util.Performance.time
+import akka.util.Timeout
 
 /**
  */
@@ -57,32 +58,15 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
       val targets = Seq(sender, statsActor)
       val start = System.nanoTime();
       try {
-        var status = 999;
-        var size = 0
-        val byteToLine = new Object() {
-          var remaining = ""
+        WS.url(url.toString).get{ response =>
+          LinkUtility.linkIteratee(response, url)
+        }.map(_.run).map(_.map { details =>
+          val duration = (System.nanoTime() - start)/1000000
 
-          def apply(bytes: Array[Byte]) : Seq[String] = {
-            val lines = (remaining + new String(bytes)).split("\n")
-            remaining = lines.last
-            lines.dropRight(1)
-          }
-        }
-
-        val hp = WS.url(url.toString).get{ response =>
-          status = response.status
-          Enumeratee.map[Array[Byte]] { byteToLine(_)} &>>
-          Iteratee.fold[Seq[String], Seq[URL]](Seq.empty) { (urls, lines) =>
-            urls ++ (lines flatMap(findLinks(_, Some(url))))
-          }
-        }
-        val links = hp.map(_.run).await.get.await.get
-
-        val duration = System.currentTimeMillis() - start
-
-        val res = CrawlResult(url, status, duration, size, links)
-        Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
-        targets foreach (_ ! res)
+          val res = CrawlResult(url, details.response.status, duration, details.size, details.links)
+          Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
+          targets foreach (_ ! res)
+        })
       } catch {
         case e @ _ =>
           val duration = System.nanoTime() - start
@@ -208,7 +192,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
    */
   def addUrl(url: URL)(implicit r: RedisClient) {
     if (shouldCrawl(url)) {
-      if (active.size < 3 * concurrency) {
+      if (active.size < concurrency) {
         launchCrawl(url)
       } else {
         pending = pending + url

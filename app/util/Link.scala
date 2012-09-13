@@ -1,6 +1,9 @@
 package util
 
 import java.net.{MalformedURLException, URL}
+import play.api.libs.ws.{ResponseHeaders, WS, Response}
+import play.api.libs.iteratee.{Iteratee, Enumeratee}
+import play.api.Logger
 
 object LinkUtility {
   val LinkPattern = """(?s)(<a[^>]*>)""".r
@@ -29,5 +32,33 @@ object LinkUtility {
       case _ => None
     }
     res.toList.toSeq
+  }
+
+  case class ResponseDetails(response : ResponseHeaders, size : Int, links : Seq[URL])
+
+  def linkIteratee(r : ResponseHeaders, url : URL ) = {
+    val t = r.headers("Content-Type")(0)
+    if (!t.startsWith("text/html")) {
+      Logger.debug("Ignoring "+url+" as the content type is "+t)
+      throw new Exception("Will only process text/html")
+    }
+    val byteToLine = new Object() {
+      var remaining = ""
+      var size = 0
+      def apply(bytes: Array[Byte]) : Seq[String] = {
+        size+=bytes.size
+        val lines = (remaining + new String(bytes)).split("\n")
+        remaining = lines.last
+        lines.dropRight(1)
+      }
+    }
+    Enumeratee.map[Array[Byte]] { byteToLine(_) } &>>
+      Iteratee.fold[Seq[String], ResponseDetails](ResponseDetails(r, 0, Seq.empty)) {
+        (details, lines) =>
+          details.copy(
+            links = details.links ++ (lines flatMap (findLinks(_, Some(url)))),
+            size = byteToLine.size
+          )
+      }
   }
 }
