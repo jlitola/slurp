@@ -7,7 +7,7 @@ import play.api.Play.current
 import akka.util.duration._
 import play.api.Logger
 import collection._
-import immutable.HashSet
+import immutable.{HashMap, HashSet}
 import play.api.libs.iteratee.{Enumerator, PushEnumerator}
 import util.LinkUtility.findLinks
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
@@ -84,6 +84,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
 class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var pending = HashSet.empty[URL]
   var active = Seq.empty[URL]
+  var visited = Map.empty[URL, Long]
   var stopping = false
   lazy val robots : RobotsExclusion = fetchRobots()
 
@@ -105,18 +106,20 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
           addUrl(url)
       }
 
-    case c @ CrawlResult(url, status, duration, size, links) =>
+    case CrawlResult(url, status, duration, size, links) =>
       active = active.filterNot(_ equals url)
       redis.withClient {
         implicit r =>
-          r.zadd("visited:" + site, System.currentTimeMillis, url.toString())
+          val time = System.currentTimeMillis
+          r.zadd("visited:" + site, time, url.toString())
+          visited = visited + (url -> time)
+
           val (local, other) = links.partition(site equals _.getHost)
-          Logger.info("Found %d local and %d other links, and already had %d in %s" format (local.size, other.size, pending.size, url))
 
           CrawlManager.ref ! LinksFound(other)
 
-          pending = pending ++ local.filter({
-            u => r.zscore("visited:" + site, u.toString).isEmpty
+          pending = pending ++ local.filterNot({
+            u => visited.contains(u)
           })
 
           pending = pending.dropWhile(!shouldCrawl(_))
@@ -147,6 +150,17 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     case msg @ _ => Logger.warn("Unknown message! "+msg)
   }
 
+  override def preStart() {
+    redis.withClient { r=>
+      r.zrangeWithScore("visited:"+site, 0, -1) map { l =>
+        visited = visited ++ l.map { v =>
+          val (url, score) = (v._1, v._2)
+          (new URL(url)->score.asInstanceOf[Long])
+        }
+      }
+    }
+  }
+
   def fetchRobots() : RobotsExclusion = {
     val url = "http://" + site + "/robots.txt"
     try {
@@ -158,7 +172,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   }
 
   def shouldCrawl(url : URL)(implicit r : RedisClient) : Boolean = {
-    !active.contains(url) && robots.allow(url.getFile) && r.zscore("visited:" + site, url.toString).isEmpty
+    !active.contains(url) && robots.allow(url.getFile) && ! visited.contains(url)
   }
 
   def launchCrawl(url : URL) {
