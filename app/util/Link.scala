@@ -1,13 +1,11 @@
 package util
 
 import java.net.{MalformedURLException, URL}
-import play.api.Play.current
-import play.api.Logger
 
 object LinkUtility {
   val LinkPattern = """(?s)(<a[^>]*>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
-  val HRef = """(?s).*\bhref=['"]?([^'" ]+).*""".r
+  val HRef = """.*\bhref=['"]?([^'" ]+).*""".r
   val Anchor = """#.*""".r
 
   def findLinks(document: String, baseURL: Option[URL] = None): Seq[URL] = {
@@ -30,6 +28,6 @@ object LinkUtility {
         }
       case _ => None
     }
-    res.toSeq
+    res.toList.toSeq
   }
 }
