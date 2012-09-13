@@ -106,17 +106,17 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
 
     case c @ CrawlResult(url, status, duration, size, links) =>
-      val start = System.nanoTime()
       active = active.filterNot(_ equals url)
       redis.withClient {
         implicit r =>
-          r.zadd("visited:" + site, System.nanoTime, url.toString())
+          r.zadd("visited:" + site, System.currentTimeMillis, url.toString())
           val (local, other) = links.partition(site equals _.getHost)
+          Logger.info("Found %d local and %d other links, and already had %d in %s" format (local.size, other.size, pending.size, url))
 
           CrawlManager.ref ! LinksFound(other)
 
-          pending = pending ++ local.filterNot({
-            u => r.zrank("visited:" + site, u.toString).isEmpty
+          pending = pending ++ local.filter({
+            u => r.zscore("visited:" + site, u.toString).isEmpty
           })
 
           pending = pending.dropWhile(!shouldCrawl(_))
@@ -158,7 +158,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   }
 
   def shouldCrawl(url : URL)(implicit r : RedisClient) : Boolean = {
-    !active.contains(url) && robots.allow(url.getFile) && r.zrank("visited:" + site, url.toString).isEmpty
+    !active.contains(url) && robots.allow(url.getFile) && r.zscore("visited:" + site, url.toString).isEmpty
   }
 
   def launchCrawl(url : URL) {
