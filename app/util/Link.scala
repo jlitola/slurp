@@ -5,6 +5,9 @@ import play.api.libs.ws.{ResponseHeaders, WS, Response}
 import play.api.libs.iteratee.{Iteratee, Enumeratee}
 import play.api.Logger
 
+class UnsupportedContentType (val contentType : String) extends Exception
+
+
 object LinkUtility {
   val LinkPattern = """(?s)(<a[^>]*>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
@@ -40,7 +43,7 @@ object LinkUtility {
     val t = r.headers("Content-Type")(0)
     if (!t.startsWith("text/html")) {
       Logger.debug("Ignoring "+url+" as the content type is "+t)
-      throw new Exception("Will only process text/html")
+      throw new UnsupportedContentType(t)
     }
     val byteToLine = new Object() {
       var remaining = ""

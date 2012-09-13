@@ -44,7 +44,6 @@ case class ManagerStatistics(activeSites : Int, pendingSites : Int)
 
 case class Stop()
 
-
 /**
  * Class for crawling individual urls.
  *
@@ -66,11 +65,16 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
           val res = CrawlResult(url, details.response.status, duration, details.size, details.links)
           Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
           targets foreach (_ ! res)
-        })
+        }).recover {
+          case _ =>
+            val res = CrawlResult(url, 999, (System.nanoTime() - start)/1000000, 0, Seq.empty)
+            targets foreach (_ ! res)
+        }
+
       } catch {
         case e @ _ =>
-          val duration = System.nanoTime() - start
-          Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, duration/1000000, self))
+          val duration = System.nanoTime() - start/1000000
+          Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, duration, self))
           val res = CrawlResult(url, 999, System.nanoTime() - start, 0, Seq.empty)
           targets foreach (_ ! res)
       }
