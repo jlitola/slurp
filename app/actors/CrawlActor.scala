@@ -93,10 +93,11 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   var stopping = false
   lazy val robots : RobotsExclusion = fetchRobots()
 
+  /*
   lazy val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics))
     .withRouter(new SmallestMailboxRouter(concurrency))
     .withDispatcher("play.akka.actor.crawler-dispatcher"), name="crawler")
-
+    */
 
   def receive = {
     case LinksFound(urls) =>
@@ -187,7 +188,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
   def launchCrawl(url : URL) {
     Logger.debug("Site %s launching crawl for %s with %s" format(site, url, self))
-    crawler ! new CrawlRequest(url)
+    CrawlManager.crawler ! new CrawlRequest(url)
     active = active :+ url
   }
 
@@ -333,7 +334,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
   def launchSiteActor(site : String, urls : Seq[URL]) {
     Logger.debug("Creating new site actor for "+site)
-    val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.crawler-dispatcher"))
+    val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
 
@@ -344,6 +345,7 @@ object CrawlManager {
   lazy val system = Akka.system
   lazy val ref = system.actorOf(Props(new CrawlManager(50)).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
+  lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(10)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
