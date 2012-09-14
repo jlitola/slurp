@@ -9,14 +9,11 @@ import play.api.Logger
 import collection._
 import immutable.HashSet
 import play.api.libs.iteratee._
-import util.LinkUtility.findLinks
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
 import util.{LinkUtility, RobotsExclusion}
 import crawler.Global.redis
 import com.redis.RedisClient
-import util.Performance.time
-import akka.util.Timeout
 
 /**
  */
@@ -58,7 +55,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
       val start = System.nanoTime();
       try {
         WS.url(url.toString).get{ response =>
-          LinkUtility.linkIteratee(response, url)
+          LinkUtility.byteStreamToLinksIteratee(response, url)
         }.map(_.run).map(_.map { details =>
           val duration = (System.nanoTime() - start)/1000000
 
@@ -70,7 +67,6 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
             val res = CrawlResult(url, 999, (System.nanoTime() - start)/1000000, 0, Seq.empty)
             targets foreach (_ ! res)
         }
-
       } catch {
         case e @ _ =>
           val duration = System.nanoTime() - start/1000000
@@ -168,6 +164,11 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
         }
       }
     }
+  }
+  override def postStop() {
+    visited = Map.empty
+    active = Seq.empty
+    pending = HashSet.empty
   }
 
   def fetchRobots() : RobotsExclusion = {
