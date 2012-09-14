@@ -291,18 +291,18 @@ class CrawlManager(val concurrency : Int) extends Actor {
       active.remove(site) map { actor =>
         Logger.debug("Sending stop to site "+site)
         actor ! Stop()
-      }
 
-      redisClient.spop("observed_sites").foreach { newSite : String =>
-        redisClient.smembers("observed:"+newSite) map { urls =>
-          redisClient.srem("observed:"+newSite, urls.head, urls.tail)
-          launchSiteActor(newSite, urls.flatten.flatMap { url =>
-            try {
-              Some(new URL(url))
-            } catch {
-              case _ => None
-            }
-          }.toSeq)
+        redisClient.spop("observed_sites").foreach { newSite : String =>
+          redisClient.smembers("observed:"+newSite) map { urls =>
+            redisClient.srem("observed:"+newSite, urls.head, urls.tail)
+            launchSiteActor(newSite, urls.flatten.flatMap { url =>
+              try {
+                Some(new URL(url))
+              } catch {
+                case _ => None
+              }
+            }.toSeq)
+          }
         }
       }
 
