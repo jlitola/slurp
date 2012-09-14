@@ -292,9 +292,17 @@ class CrawlManager(val concurrency : Int) extends Actor {
         Logger.debug("Sending stop to site "+site)
         actor ! Stop()
       }
+
       redisClient.spop("observed_sites").foreach { newSite : String =>
         redisClient.smembers("observed:"+newSite) map { urls =>
-          launchSiteActor(newSite, urls.flatMap { url => url.map(new URL(_))}.toSeq)
+          redisClient.srem("observed:"+newSite, urls.head, urls.tail)
+          launchSiteActor(newSite, urls.flatten.flatMap { url =>
+            try {
+              Some(new URL(url))
+            } catch {
+              case _ => None
+            }
+          }.toSeq)
         }
       }
 
@@ -315,8 +323,10 @@ class CrawlManager(val concurrency : Int) extends Actor {
           if (active.size < concurrency) {
             launchSiteActor(site, siteUrls)
           } else {
-            redisClient.sadd("observed_sites", site)
-            redisClient.sadd("observed:"+site, siteUrls.head, siteUrls.tail : _*)
+            redisClient.pipeline { r=>
+              r.sadd("observed_sites", site)
+              r.sadd("observed:"+site, siteUrls.head, siteUrls.tail : _*)
+            }
           }
       }
     }
