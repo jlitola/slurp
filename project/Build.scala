@@ -8,7 +8,8 @@ object ApplicationBuild extends Build {
     val appVersion      = "1.0-SNAPSHOT"
 
     val appDependencies = Seq(
-      "net.debasishg" %% "redisclient" % "2.5"
+      "net.debasishg" %% "redisclient" % "2.5",
+      "io.netty" % "netty" % "3.5.7.Final"
       // Add your project dependencies here,
     )
 
