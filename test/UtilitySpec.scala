@@ -11,9 +11,9 @@ trait robots extends Scope {
   val rule = """User-agent: *
 Disallow: /private
 
-User-agent: Crawler
+User-agent: Slurp
 Disallow: /nocrawler"""
-  val robot = Robots(rule, "Crawler")
+  val robot = Robots(rule, "Slurp")
 }
 
 class UtilitySpec extends Specification  {

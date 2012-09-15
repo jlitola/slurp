@@ -14,6 +14,7 @@ import java.net.URL
 import util.{LinkUtility, RobotsExclusion}
 import crawler.Global.redis
 import com.redis.RedisClient
+import akka.dispatch.ExecutionContext
 
 /**
  */
@@ -63,8 +64,11 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
           Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
           targets foreach (_ ! res)
         }).recover {
-          case _ =>
-            val res = CrawlResult(url, 999, (System.nanoTime() - start)/1000000, 0, Seq.empty)
+          case e @ _ =>
+            val duration = System.nanoTime() - start/1000000
+            Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, self))
+
+            val res = CrawlResult(url, 999, duration, 0, Seq.empty)
             targets foreach (_ ! res)
         }
       } catch {
@@ -175,7 +179,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   def fetchRobots() : RobotsExclusion = {
     val url = "http://" + site + "/robots.txt"
     try {
-      RobotsExclusion(WS.url(url).get().await(5000).get.body, "Crawler")
+      RobotsExclusion(WS.url(url).get().await(5000).get.body, "Slurp")
     } catch {
       case _ =>
         new RobotsExclusion(Seq.empty)
