@@ -91,17 +91,11 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
  * @param concurrency How many concurrent crawlers to use
  */
 class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
-  var pending = Set.empty[URL]
-  var active = Seq.empty[URL]
-  var visited = Map.empty[URL, Long]
+  var pending = Set.empty[String]
+  var active = Seq.empty[String]
+  var visited = Map.empty[String, Long]
   var stopping = false
   lazy val robots : RobotsExclusion = fetchRobots()
-
-  /*
-  lazy val crawler = context.actorOf(Props(new CrawlActor(CrawlManager.statistics))
-    .withRouter(new SmallestMailboxRouter(concurrency))
-    .withDispatcher("play.akka.actor.crawler-dispatcher"), name="crawler")
-    */
 
   def receive = {
     case LinksFound(urls) =>
@@ -122,15 +116,13 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
         implicit r =>
           val time = System.currentTimeMillis
           r.zadd("visited:" + site, time, url.toString())
-          visited = visited + (url -> time)
+          visited = visited + (url.getPath -> time)
 
-          val (local, other) = links.partition(site equals _.getHost)
+          val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
 
           CrawlManager.ref ! LinksFound(other)
 
-          pending = pending ++ local.filterNot({
-            u => visited.contains(u)
-          })
+          pending = pending ++ local.map(_.getPath).filterNot( visited.contains( _ ) )
 
           pending = pending.dropWhile(!shouldCrawl(_))
 
@@ -165,7 +157,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       r.zrangeWithScore("visited:"+site, 0, -1) map { l =>
         visited = visited ++ l.map { v =>
           val (url, score) = (v._1, v._2)
-          (new URL(url)->score.asInstanceOf[Long])
+          (new URL(url).getPath -> score.asInstanceOf[Long])
         }
       }
     }
@@ -186,14 +178,15 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     }
   }
 
-  def shouldCrawl(url : URL)(implicit r : RedisClient) : Boolean = {
-    !active.contains(url) && robots.allow(url.getFile) && ! visited.contains(url)
+  def shouldCrawl(path : String)(implicit r : RedisClient) : Boolean = {
+    !active.contains(path) && robots.allow(path) && ! visited.contains(path)
   }
 
-  def launchCrawl(url : URL) {
-    Logger.debug("Site %s launching crawl for %s with %s" format(site, url, self))
+  def launchCrawl(path : String) {
+    Logger.debug("Site %s launching crawl for %s with %s" format(site, path, self))
+    val url = new URL(site+path)
     CrawlManager.crawler ! new CrawlRequest(url)
-    active = active :+ url
+    active = active :+ path
   }
 
   /**
@@ -201,11 +194,12 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
    * @return Whether url was accepted
    */
   def addUrl(url: URL)(implicit r: RedisClient) {
-    if (shouldCrawl(url)) {
+    val path = url.getPath
+    if (shouldCrawl(path)) {
       if (active.size < concurrency) {
-        launchCrawl(url)
+        launchCrawl(path)
       } else {
-        pending = pending + url
+        pending = pending + path
       }
     }
   }
@@ -319,7 +313,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   def registerLink(urls : Seq[URL]) {
-    urls groupBy (_.getHost) foreach { a =>
+    urls groupBy (LinkUtility.baseUrl(_)) foreach { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
