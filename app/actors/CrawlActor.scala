@@ -5,7 +5,7 @@ import play.api.libs.ws._
 import play.api.libs.concurrent.Akka
 import play.api.Play.current
 import akka.util.duration._
-import play.api.Logger
+import play.api.{Play, Logger}
 import collection._
 import immutable.HashSet
 import play.api.libs.iteratee._
@@ -91,7 +91,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
  * @param concurrency How many concurrent crawlers to use
  */
 class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
-  var pending = HashSet.empty[URL]
+  var pending = Set.empty[URL]
   var active = Seq.empty[URL]
   var visited = Map.empty[URL, Long]
   var stopping = false
@@ -173,7 +173,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   override def postStop() {
     visited = Map.empty
     active = Seq.empty
-    pending = HashSet.empty
+    pending = Set.empty
   }
 
   def fetchRobots() : RobotsExclusion = {
@@ -347,9 +347,9 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
 object CrawlManager {
   lazy val system = Akka.system
-  lazy val ref = system.actorOf(Props(new CrawlManager(50)).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
+  lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
-  lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(10)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
+  lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
