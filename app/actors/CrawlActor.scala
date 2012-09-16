@@ -111,6 +111,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
 
     case CrawlResult(url, status, duration, size, links) =>
+      try {
       active = active.filterNot(_ equals url)
       redis.withClient {
         implicit r =>
@@ -138,6 +139,9 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
             } else
               CrawlManager.ref ! SiteCrawlFinished(site)
           }
+      }
+      } catch {
+        case e @ _ => Logger.error("Caught exception in Siteactor.receive CrawlResult: "+e)
       }
 
     case Stop() =>
