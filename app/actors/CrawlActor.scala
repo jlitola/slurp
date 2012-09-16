@@ -66,7 +66,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
         }).recover {
           case e @ _ =>
             val duration = System.nanoTime() - start/1000000
-            Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, self))
+            Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, duration, self))
 
             val res = CrawlResult(url, 999, duration, 0, Seq.empty)
             targets foreach (_ ! res)
