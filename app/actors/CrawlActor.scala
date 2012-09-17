@@ -11,7 +11,7 @@ import immutable.HashSet
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
-import util.{LinkUtility, RobotsExclusion}
+import util.{UnsupportedContentType, LinkUtility, RobotsExclusion}
 import crawler.Global.redis
 import com.redis.RedisClient
 import akka.dispatch.ExecutionContext
@@ -21,7 +21,7 @@ import akka.dispatch.ExecutionContext
 /// Request crawl for specific URL
 case class CrawlRequest(val url : URL)
 /// Results for individual crawl to url
-case class CrawlResult(url: URL, status : Int, duration : Long, bytes : Long, links : Seq[URL])
+case class CrawlResult(url: URL, status : CrawlStatus, duration : Long, bytes : Long, links : Seq[URL])
 /// Feed new url to system
 case class FeedUrl(url : String)
 /// Notify that crawling of one site has finished
@@ -35,12 +35,18 @@ case class LinksFound(urls: Seq[URL])
 /// Request for Crawl statistics
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
-case class CrawlStatistics(total: Int, success : Int, failed : Int, running : Long, bytes : Long)
+case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, running : Long, bytes : Long)
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
 
 case class Stop()
+
+trait CrawlStatus
+
+case class CrawlHttpStatus(status : Int) extends CrawlStatus
+case class SkippedContentType(contentType : String) extends CrawlStatus
+case class CrawlException(exception : Throwable) extends CrawlStatus
 
 /**
  * Class for crawling individual urls.
@@ -58,27 +64,21 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
         WS.url(url.toString).get{ response =>
           LinkUtility.byteStreamToLinksIteratee(response, url)
         }.map(_.run).map(_.map { details =>
-          val duration = (System.nanoTime() - start)/1000000
-
-          val res = CrawlResult(url, details.response.status, duration, details.size, details.links)
-          Logger.debug("Finished crawling url %s in %dms with %s" format(url, duration, self))
-          targets foreach (_ ! res)
+          sendResults(targets, CrawlResult(url, CrawlHttpStatus(details.response.status), System.nanoTime-start, details.size, details.links))
         }).recover {
-          case e @ _ =>
-            val duration = System.nanoTime() - start/1000000
-            Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, duration, self))
-
-            val res = CrawlResult(url, 999, duration, 0, Seq.empty)
-            targets foreach (_ ! res)
+          case e : UnsupportedContentType => sendResults(targets, CrawlResult(url, SkippedContentType(e.contentType), System.nanoTime() - start, 0, Seq.empty))
+          case e @ _ => sendResults(targets, CrawlResult(url, CrawlException(e), System.nanoTime() - start, 0, Seq.empty))
         }
       } catch {
-        case e @ _ =>
-          val duration = System.nanoTime() - start/1000000
-          Logger.debug("Finished crawling url %s with error (%s) in %dms with %s" format(url, e, duration, self))
-          val res = CrawlResult(url, 999, System.nanoTime() - start, 0, Seq.empty)
-          targets foreach (_ ! res)
+        case e @ _ => sendResults(targets, CrawlResult(url, CrawlException(e), System.nanoTime() - start, 0, Seq.empty))
       }
   }
+
+  def sendResults(targets : Seq[ActorRef], result : CrawlResult) = {
+    Logger.debug("Finished crawling url %s with status (%s) in %dms with %s" format(result.url, result.status, result.duration/1000000, self))
+    targets foreach (_ ! result)
+  }
+
   override def preRestart(reason : Throwable , message : Option[Any]) {
     Logger.error("CrawlActor got restarted due %s with message %s" format(reason, message))
     super.preRestart(reason,message)
@@ -230,12 +230,13 @@ class CrawlStatisticsActor extends Actor {
   var total = 0
   var success = 0
   var failed = 0
+  var ignored = 0
   var totalSites = 0
   var pendingSites = 0
   var bytes : Long = 0
   val start = System.nanoTime()
   var listeners = Seq.empty[PushEnumerator[String]]
-  var lastStats = CrawlStatistics(0,0,0, System.nanoTime(),0)
+  var lastStats = CrawlStatistics(0,0,0,0, System.nanoTime(),0)
 
   Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
 
@@ -247,14 +248,15 @@ class CrawlStatisticsActor extends Actor {
       total += 1
       bytes += size
       status match {
-        case 200 | 202 | 204 => success += 1
+        case CrawlHttpStatus(200 | 202 | 204) => success += 1
+        case SkippedContentType(contentType) => ignored += 1
         case _ => failed += 1
       }
 
     case CrawlStatisticsRequest() =>
       Logger.debug("Received statistics request")
       listeners.foreach(_.push(statsHtml.toString))
-      lastStats = CrawlStatistics(total, success, failed, System.nanoTime(), bytes)
+      lastStats = CrawlStatistics(total, success, failed, ignored, System.nanoTime(), bytes)
 
     case ManagerStatistics(t, p) => totalSites = t; pendingSites = p
 
@@ -275,7 +277,7 @@ class CrawlStatisticsActor extends Actor {
     val fromStart = (System.nanoTime()-start)/1000000000.0
     val fromLast = (System.nanoTime()-lastStats.running)/1000000000.0
     "<pre>" +
-      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, fromStart, bytes/1024.0)) +
+      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, fromStart, bytes/1024.0)) +
       ("delta crawls: total %.2f 1/s, %.2f kBs" format ((total-lastStats.total)/fromLast, (bytes-lastStats.bytes)/fromLast/1024.0)) +
     "</pre>"
   }
