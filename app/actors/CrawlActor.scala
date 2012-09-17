@@ -106,12 +106,20 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       redis.withClient {
         implicit r =>
           urls foreach ( addUrl(_) )
+          if(active.size == 0) {
+            Logger.info("Notifying manager that site crawl for %s is finished" format (site))
+            CrawlManager.ref ! SiteCrawlFinished(site)
+          }
       }
 
     case CrawlRequest(url) =>
       redis.withClient {
         implicit r =>
           addUrl(url)
+          if(active.size == 0) {
+            Logger.info("Notifying manager that site crawl for %s is finished" format (site))
+            CrawlManager.ref ! SiteCrawlFinished(site)
+          }
       }
 
     case CrawlResult(url, status, duration, size, links) =>
@@ -140,7 +148,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
               Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
               context.stop(self)
             } else {
-              Logger.info("Notifying manager that site crawl is finished")
+              Logger.info("Notifying manager that site crawl for %s is finished" format (site))
               CrawlManager.ref ! SiteCrawlFinished(site)
             }
           }
@@ -180,7 +188,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   }
 
   def fetchRobots() : RobotsExclusion = {
-    val url = "http://" + site + "/robots.txt"
+    val url = site + "/robots.txt"
     try {
       RobotsExclusion(WS.url(url).get().await(5000).get.body, "Slurp")
     } catch {
@@ -230,7 +238,6 @@ class CrawlStatisticsActor extends Actor {
   var lastStats = CrawlStatistics(0,0,0, System.nanoTime(),0)
 
   Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
-
 
   def receive = {
     case "tick" =>
