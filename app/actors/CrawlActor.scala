@@ -79,6 +79,10 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
           targets foreach (_ ! res)
       }
   }
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("CrawlActor got restarted due %s with message %s" format(reason, message))
+    super.preRestart(reason,message)
+  }
 }
 
 /**
@@ -111,39 +115,35 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
 
     case CrawlResult(url, status, duration, size, links) =>
-      try {
-        active = active.filterNot(_ equals url.getPath)
-        redis.withClient {
-          implicit r =>
-            val time = System.currentTimeMillis
-            r.zadd("visited:" + site, time, url.toString())
-            visited = visited + (url.getPath -> time)
+      active = active.filterNot(_ equals url.getPath)
+      redis.withClient {
+        implicit r =>
+          val time = System.currentTimeMillis
+          r.zadd("visited:" + site, time, url.toString())
+          visited = visited + (url.getPath -> time)
 
-            val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
+          val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
 
-            CrawlManager.ref ! LinksFound(other)
+          CrawlManager.ref ! LinksFound(other)
 
-            pending = pending ++ local.map(_.getPath).filterNot( visited.contains( _ ) )
+          pending = pending ++ local.map(_.getPath).filterNot( visited.contains( _ ) )
 
-            pending = pending.dropWhile(!shouldCrawl(_))
+          pending = pending.dropWhile(!shouldCrawl(_))
 
-            if(pending.nonEmpty) {
-              launchCrawl(pending.head)
-              pending = pending.tail
+          if(pending.nonEmpty) {
+            launchCrawl(pending.head)
+            pending = pending.tail
+          }
+
+          if (pending.isEmpty && active.isEmpty) {
+            if (stopping) {
+              Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
+              context.stop(self)
+            } else {
+              Logger.info("Notifying manager that site crawl is finished")
+              CrawlManager.ref ! SiteCrawlFinished(site)
             }
-
-            if (pending.isEmpty && active.isEmpty) {
-              if (stopping) {
-                Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
-                context.stop(self)
-              } else {
-                Logger.info("Notifying manager that site crawl is finished")
-                CrawlManager.ref ! SiteCrawlFinished(site)
-              }
-            }
-        }
-      } catch {
-        case e @ _ => Logger.error("Caught exception in Siteactor.receive CrawlResult: "+e)
+          }
       }
 
     case Stop() =>
@@ -167,6 +167,12 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
     }
   }
+
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("Actor for site %s got restarted due %s with message %s" format(site, reason, message))
+    super.preRestart(reason,message)
+  }
+
   override def postStop() {
     visited = Map.empty
     active = Seq.empty
