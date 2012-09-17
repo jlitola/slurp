@@ -39,7 +39,13 @@ object LinkUtility {
 
   case class ResponseDetails(response : ResponseHeaders, size : Int, links : Seq[URL])
 
-  def byteStreamToLinksIteratee(r : ResponseHeaders, url : URL ) = {
+  def byteStreamToLinksIteratee(r : ResponseHeaders, url : URL ) : Iteratee[Array[Byte], LinkUtility.ResponseDetails]= {
+    if(r.status==301 || r.status==302) {
+      val links = r.headers.get("Location").collect {
+        case Seq(url : String) => Seq(new URL(url))
+      }.getOrElse(Seq.empty[URL])
+      return Iteratee.fold[Array[Byte], ResponseDetails](ResponseDetails(r, 0, links)) { (details, bytes) => details}
+    }
     val t = r.headers.get("Content-Type").getOrElse(Seq("text/html"))(0)
     if (!t.startsWith("text/html")) {
       Logger.debug("Ignoring "+url+" as the content type is "+t)

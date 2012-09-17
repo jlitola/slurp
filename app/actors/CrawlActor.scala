@@ -35,7 +35,7 @@ case class LinksFound(urls: Seq[URL])
 /// Request for Crawl statistics
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
-case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, running : Long, bytes : Long)
+case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, redirect : Int, running : Long, bytes : Long)
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
@@ -229,12 +229,13 @@ class CrawlStatisticsActor extends Actor {
   var success = 0
   var failed = 0
   var ignored = 0
+  var redirect = 0
   var totalSites = 0
   var pendingSites = 0
   var bytes : Long = 0
   val start = System.nanoTime()
   var listeners = Seq.empty[PushEnumerator[String]]
-  var lastStats = CrawlStatistics(0,0,0,0, System.nanoTime(),0)
+  var lastStats = CrawlStatistics(0,0,0,0,0, System.nanoTime(),0)
 
   Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
 
@@ -247,14 +248,22 @@ class CrawlStatisticsActor extends Actor {
       bytes += size
       status match {
         case CrawlHttpStatus(200 | 202 | 204) => success += 1
+        case CrawlHttpStatus(301 | 302) =>
+          Logger.debug("url "+url+" is redirected to "+links)
+          redirect += 1
+        case CrawlHttpStatus(status) if status > 400 =>
+          failed += 1
+          Logger.error("HTTP error "+status+" at "+url)
         case SkippedContentType(contentType) => ignored += 1
-        case _ => failed += 1
+        case _ =>
+          failed += 1
+          Logger.error("Status needing handling "+status)
       }
 
     case CrawlStatisticsRequest() =>
       Logger.debug("Received statistics request")
       listeners.foreach(_.push(statsHtml.toString))
-      lastStats = CrawlStatistics(total, success, failed, ignored, System.nanoTime(), bytes)
+      lastStats = CrawlStatistics(total, success, failed, ignored, redirect, System.nanoTime(), bytes)
 
     case ManagerStatistics(t, p) => totalSites = t; pendingSites = p
 
@@ -275,7 +284,7 @@ class CrawlStatisticsActor extends Actor {
     val fromStart = (System.nanoTime()-start)/1000000000.0
     val fromLast = (System.nanoTime()-lastStats.running)/1000000000.0
     "<pre>" +
-      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, fromStart, bytes/1024.0)) +
+      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, fromStart, bytes/1024.0)) +
       ("delta crawls: total %.2f 1/s, %.2f kBs" format ((total-lastStats.total)/fromLast, (bytes-lastStats.bytes)/fromLast/1024.0)) +
     "</pre>"
   }
