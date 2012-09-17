@@ -106,20 +106,14 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       redis.withClient {
         implicit r =>
           urls foreach ( addUrl(_) )
-          if(active.size == 0) {
-            Logger.info("Notifying manager that site crawl for %s is finished" format (site))
-            CrawlManager.ref ! SiteCrawlFinished(site)
-          }
+          if(active.isEmpty) notifyCrawlFinished
       }
 
     case CrawlRequest(url) =>
       redis.withClient {
         implicit r =>
           addUrl(url)
-          if(active.size == 0) {
-            Logger.info("Notifying manager that site crawl for %s is finished" format (site))
-            CrawlManager.ref ! SiteCrawlFinished(site)
-          }
+          if(active.isEmpty) notifyCrawlFinished
       }
 
     case CrawlResult(url, status, duration, size, links) =>
@@ -147,10 +141,8 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
             if (stopping) {
               Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
               context.stop(self)
-            } else {
-              Logger.info("Notifying manager that site crawl for %s is finished" format (site))
-              CrawlManager.ref ! SiteCrawlFinished(site)
-            }
+            } else
+              notifyCrawlFinished
           }
       }
 
@@ -187,6 +179,11 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     pending = Set.empty
   }
 
+  def notifyCrawlFinished {
+    Logger.info("Notifying manager that site crawl for %s is finished" format (site))
+    CrawlManager.ref ! SiteCrawlFinished(site)
+  }
+
   def fetchRobots() : RobotsExclusion = {
     val url = site + "/robots.txt"
     try {
@@ -203,7 +200,8 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
   def launchCrawl(path : String) {
     Logger.debug("Site %s launching crawl for %s with %s" format(site, path, self))
-    val url = new URL(site+path)
+    val p = if (path.startsWith("/")) path else "/"+path
+    val url = new URL(site+p)
     CrawlManager.crawler ! new CrawlRequest(url)
     active = active :+ path
   }
