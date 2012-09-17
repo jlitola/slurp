@@ -106,14 +106,14 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       redis.withClient {
         implicit r =>
           urls foreach ( addUrl(_) )
-          if(active.isEmpty) notifyCrawlFinished
+          if(active.isEmpty && !stopping) notifyCrawlFinished
       }
 
     case CrawlRequest(url) =>
       redis.withClient {
         implicit r =>
           addUrl(url)
-          if(active.isEmpty) notifyCrawlFinished
+          if(active.isEmpty && !stopping) notifyCrawlFinished
       }
 
     case CrawlResult(url, status, duration, size, links) =>
@@ -203,7 +203,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
     val p = if (path.startsWith("/")) path else "/"+path
     val url = new URL(site+p)
     CrawlManager.crawler ! new CrawlRequest(url)
-    active = active :+ path
+    active = active :+ p
   }
 
   /**
@@ -358,7 +358,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
     }
   }
   def launchSiteActor(site : String, urls : Seq[URL]) {
-    Logger.debug("Creating new site actor for "+site)
+    Logger.info("Creating new site actor for "+site)
     val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
