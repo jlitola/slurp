@@ -12,6 +12,7 @@ import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
 import util.{UnsupportedContentType, LinkUtility, RobotsExclusion}
+import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
 import akka.dispatch.ExecutionContext
@@ -117,18 +118,18 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
 
     case CrawlResult(url, status, duration, size, links) =>
-      active = active.filterNot(_ equals url.getPath)
+      active = active.filterNot(_ equals getPath(url))
       redis.withClient {
         implicit r =>
           val time = System.currentTimeMillis
           r.zadd("visited:" + site, time, url.toString())
-          visited = visited + (url.getPath -> time)
+          visited = visited + (getPath(url) -> time)
 
           val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
 
           CrawlManager.ref ! LinksFound(other)
 
-          pending = pending ++ local.map(_.getPath).filterNot( visited.contains( _ ) )
+          pending = pending ++ local.map(getPath(_)).filterNot( visited.contains( _ ) )
 
           pending = pending.dropWhile(!shouldCrawl(_))
 
@@ -162,7 +163,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       r.zrangeWithScore("visited:"+site, 0, -1) map { l =>
         visited = visited ++ l.map { v =>
           val (url, score) = (v._1, v._2)
-          (new URL(url).getPath -> score.asInstanceOf[Long])
+          (getPath(new URL(url)) -> score.asInstanceOf[Long])
         }
       }
     }
@@ -200,10 +201,9 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
   def launchCrawl(path : String) {
     Logger.debug("Site %s launching crawl for %s with %s" format(site, path, self))
-    val p = if (path.startsWith("/")) path else "/"+path
-    val url = new URL(site+p)
+    val url = new URL(site+path)
     CrawlManager.crawler ! new CrawlRequest(url)
-    active = active :+ p
+    active = active :+ path
   }
 
   /**
@@ -211,7 +211,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
    * @return Whether url was accepted
    */
   def addUrl(url: URL)(implicit r: RedisClient) {
-    val path = url.getPath
+    val path = getPath(url)
     if (shouldCrawl(path)) {
       if (active.size < concurrency) {
         launchCrawl(path)
