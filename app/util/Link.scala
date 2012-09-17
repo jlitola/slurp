@@ -40,7 +40,7 @@ object LinkUtility {
   case class ResponseDetails(response : ResponseHeaders, size : Int, links : Seq[URL])
 
   def byteStreamToLinksIteratee(r : ResponseHeaders, url : URL ) = {
-    val t = r.headers("Content-Type")(0)
+    val t = r.headers.get("Content-Type").getOrElse(Seq("text/html"))(0)
     if (!t.startsWith("text/html")) {
       Logger.debug("Ignoring "+url+" as the content type is "+t)
       throw new UnsupportedContentType(t)
