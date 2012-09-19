@@ -77,9 +77,17 @@ object LinkUtility {
           )
       }
   }
+
   def baseUrl(url : URL) : String = {
     val port = url.getPort
-    "%s://%s%s" format (url.getProtocol, url.getHost, if (port == -1 || port==url.getDefaultPort) "" else ":"+url.getPort)
+    val s = new StringBuilder(url.getProtocol)
+    s.append("://")
+    s.append(url.getHost)
+    if (port != -1 && port!=url.getDefaultPort) {
+      s.append(":")
+      s.append(url.getPort.toString)
+    }
+    s.toString
   }
 
 }
