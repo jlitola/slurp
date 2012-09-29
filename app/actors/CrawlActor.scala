@@ -7,12 +7,9 @@ import play.api.Play.current
 import akka.util.duration._
 import play.api.{Play, Logger}
 import collection._
-import immutable.HashSet
 import play.api.libs.iteratee._
-import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
-import java.net.URL
-import util.{UnsupportedContentType, LinkUtility, RobotsExclusion}
-import LinkUtility.getPath
+import akka.routing.SmallestMailboxRouter
+import util.{Link, UnsupportedContentType, LinkUtility, RobotsExclusion}
 import crawler.Global.redis
 import com.redis.RedisClient
 import akka.dispatch.{Future, ExecutionContext}
@@ -20,9 +17,9 @@ import akka.dispatch.{Future, ExecutionContext}
 /**
  */
 /// Request crawl for specific URL
-case class CrawlRequest(val url : URL)
+case class CrawlRequest(val url : Link)
 /// Results for individual crawl to url
-case class CrawlResult(url: URL, status : CrawlStatus, duration : Long, bytes : Long, links : Seq[URL])
+case class CrawlResult(url: Link, status : CrawlStatus, duration : Long, bytes : Long, links : Seq[Link])
 /// Feed new url to system
 case class FeedUrl(url : String)
 /// Notify that crawling of one site has finished
@@ -32,7 +29,7 @@ case class Listen()
 /// Quit listening on channel
 case class Quit(channel: PushEnumerator[String])
 /// Notify about the links found
-case class LinksFound(urls: Seq[URL])
+case class LinksFound(urls: Seq[Link])
 /// Request for Crawl statistics
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
@@ -111,7 +108,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       }
 
     case CrawlResult(url, status, duration, size, links) =>
-      active = active.filterNot(_ equals getPath(url))
+      active = active.filterNot(_ equals url.path)
       val time = System.currentTimeMillis
       val urlString = url.toString
 
@@ -125,13 +122,13 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
             r.zadd("visited:" + site, time, urlString)
         }
       }
-      visited = visited + (getPath(url) -> time)
+      visited = visited + (url.path -> time)
 
-      val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
+      val (local, other) = links.partition(site equals _.base)
 
       if(other.nonEmpty) context.parent ! LinksFound(other)
 
-      pending ++= local.map(getPath(_)).filterNot( visited.contains( _ ) )
+      pending ++= local.map(_.path).filterNot( visited.contains( _ ) )
 
       var done = false
       while(!done && pending.nonEmpty) {
@@ -168,7 +165,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
       r.zrangeWithScore("visited:"+site, 0, -1) map { l =>
         visited = visited ++ l.map { v =>
           val (url, score) = (v._1, v._2)
-          (getPath(new URL(url)) -> score.asInstanceOf[Long])
+          (Link(url).path -> score.asInstanceOf[Long])
         }
       }
     }
@@ -209,7 +206,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
   def launchCrawl(path : String) {
     Logger.debug("Site %s launching crawl for %s with %s" format(site, path, self))
-    val url = new URL(site+path)
+    val url = new Link(site, path)
     CrawlManager.crawler ! CrawlRequest(url)
     active = active :+ path
   }
@@ -218,8 +215,8 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
    * Add url for processing
    * @return Whether url was accepted
    */
-  def addUrl(url: URL)(implicit r: RedisClient) {
-    val path = getPath(url)
+  def addUrl(url: Link)(implicit r: RedisClient) {
+    val path = url.path
     if (shouldCrawl(path)) {
       if (active.size < concurrency) {
         launchCrawl(path)
@@ -318,7 +315,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
     case FeedUrl(url) =>
       Logger.debug("Feeded system with url "+url)
-      registerLink(Seq(new URL(url)))
+      registerLink(Seq(Link(url)))
 
     case SiteCrawlFinished(site) =>
       Logger.info("Finished site crawl for "+site)
@@ -336,7 +333,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
                   if (filtered.nonEmpty)
                     launchSiteActor(newSite, filtered.flatten.flatMap { url =>
                       try {
-                        Some(new URL(url))
+                        Some(Link(url))
                       } catch {
                         case _ => None
                       }
@@ -356,8 +353,8 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
   }
 
-  def registerLink(urls : Seq[URL]) {
-    val queued = urls groupBy (LinkUtility.baseUrl(_)) map { a =>
+  def registerLink(urls : Seq[Link]) {
+    val queued = urls groupBy (_.base) map { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
@@ -387,7 +384,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
     }
 
   }
-  def launchSiteActor(site : String, urls : Seq[URL]) {
+  def launchSiteActor(site : String, urls : Seq[Link]) {
     Logger.info("Creating new site actor for "+site)
     val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
