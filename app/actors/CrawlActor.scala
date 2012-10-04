@@ -11,7 +11,7 @@ import immutable.HashSet
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
-import util.{UnsupportedContentType, LinkUtility, RobotsExclusion}
+import util.{HttpError, UnsupportedContentType, LinkUtility, RobotsExclusion}
 import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
@@ -68,6 +68,7 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
         }.map(_.run).map(_.map { details =>
           sendResults(targets, CrawlResult(url, CrawlHttpStatus(details.response.status), System.nanoTime-start, details.size, details.links))
         }).recover {
+          case e : HttpError => sendResults(targets, CrawlResult(url, CrawlHttpStatus(e.status), System.nanoTime-start, 0, Seq.empty))
           case e : UnsupportedContentType => sendResults(targets, CrawlResult(url, SkippedContentType(e.contentType), System.nanoTime() - start, 0, Seq.empty))
           case e : java.util.concurrent.TimeoutException => sendResults(targets, CrawlResult(url, CrawlTimeout(), System.nanoTime() - start, 0, Seq.empty))
           case e @ _ => sendResults(targets, CrawlResult(url, CrawlException(e), System.nanoTime() - start, 0, Seq.empty))

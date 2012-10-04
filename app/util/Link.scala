@@ -6,12 +6,13 @@ import play.api.libs.iteratee.{Iteratee, Enumeratee}
 import play.api.Logger
 
 class UnsupportedContentType (val contentType : String) extends Exception
+class HttpError (val status : Int) extends Exception
 
 
 object LinkUtility {
   val LinkPattern = """(?s)(<a.*?>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
-  val HRef = """.*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s]+)).*""".r
+  val HRef = """.*\bhref\s*=\s*(?:"([^"\s]+)"|'([^'\s]+)'|([^"'\s]+)).*""".r
   val Anchor = """#.*""".r
 
   def getPath(url : URL ) = {
@@ -51,11 +52,15 @@ object LinkUtility {
   case class ResponseDetails(response : ResponseHeaders, size : Int, links : Seq[URL])
 
   def byteStreamToLinksIteratee(r : ResponseHeaders, url : URL ) : Iteratee[Array[Byte], LinkUtility.ResponseDetails]= {
-    if(r.status==301 || r.status==302) {
-      val links = r.headers.get("Location").collect {
-        case Seq(u : String) => Seq(new URL(url, u))
-      }.getOrElse(Seq.empty[URL])
-      return Iteratee.fold[Array[Byte], ResponseDetails](ResponseDetails(r, 0, links)) { (details, bytes) => details}
+    r.status match {
+      case 301 | 302 =>
+        val links = r.headers.get("Location").collect {
+          case Seq(u : String) => Seq(new URL(url, u))
+        }.getOrElse(Seq.empty[URL])
+        return Iteratee.fold[Array[Byte], ResponseDetails](ResponseDetails(r, 0, links)) { (details, bytes) => details}
+      case status : Int if status >= 400 =>
+        throw new HttpError(status)
+      case _ =>
     }
     val t = r.headers.get("Content-Type").getOrElse(Seq("text/html"))(0)
     if (!t.startsWith("text/html")) {
