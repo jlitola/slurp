@@ -13,7 +13,7 @@ Disallow: /private
 
 User-agent: Slurp
 Disallow: /nocrawler"""
-  val robot = Robots(rule, "Slurp")
+  val robot = RobotsExclusion(rule, "Slurp")
 }
 
 class UtilitySpec extends Specification  {
@@ -44,7 +44,7 @@ class UtilitySpec extends Specification  {
 
   "RobotsExclusion" should {
     "be able to parse robots.txt" in new robots {
-      robot must haveClass[Robots]
+      robot must haveClass[RobotsExclusion]
     }
     "allow access based on rules" in new robots {
       robot.allow("/anything") must beTrue
