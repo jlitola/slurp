@@ -9,9 +9,9 @@ class UnsupportedContentType (val contentType : String) extends Exception
 
 
 object LinkUtility {
-  val LinkPattern = """(?s)(<a[^>]*>)""".r
+  val LinkPattern = """(?s)(<a.*?>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
-  val HRef = """.*\bhref=['"]?([^'" ]+).*""".r
+  val HRef = """.*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s]+)).*""".r
   val Anchor = """#.*""".r
 
   def getPath(url : URL ) = {
@@ -24,7 +24,11 @@ object LinkUtility {
   def findLinks(document: String, baseURL: Option[URL] = None): Seq[URL] = {
     val res = LinkPattern findAllIn (document) flatMap {
       case NoFollow() => None
-      case HRef(url) =>
+      case HRef(url1, url2, url3) =>
+        val url =
+          if (url1!=null) url1
+            else if (url2!=null) url2
+            else url3
         val trimmedUrl = Anchor.replaceFirstIn(url, "")
         try {
           val computedUrl = baseURL match {

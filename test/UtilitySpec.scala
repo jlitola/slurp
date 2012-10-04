@@ -25,7 +25,7 @@ class UtilitySpec extends Specification  {
       LinkUtility.findLinks("""<a href="http://foo.com" rel="nofollow">Link</a>""") must have size(0)
     }
     "gracefully ignore if there are no links" in {
-      LinkUtility.findLinks("""Lorem ipsum...</a>""") must have size(0)
+      LinkUtility.findLinks("""Lorem ipsum...""") must have size(0)
     }
     "match multiple links" in {
       LinkUtility.findLinks("""<a href="http://foo.com">Link</a>\n<a href="http://foo.com" rel="nofollow">Link</a><a href="http://bar.com">Link</a>""") must have size(2)
