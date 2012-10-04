@@ -9,7 +9,7 @@ object ApplicationBuild extends Build {
 
     val appDependencies = Seq(
       "net.debasishg" %% "redisclient" % "2.5",
-      "io.netty" % "netty" % "3.5.7.Final"
+      "io.netty" % "netty" % "3.5.8.Final"
     )
 
     val main = PlayProject(appName, appVersion, appDependencies, mainLang = SCALA).settings(
