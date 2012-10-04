@@ -265,7 +265,7 @@ class CrawlStatisticsActor extends Actor {
         case CrawlHttpStatus(301 | 302) =>
           Logger.debug("url "+url+" is redirected to "+links)
           redirect += 1
-        case CrawlHttpStatus(st) if st > 400 =>
+        case CrawlHttpStatus(st) if st >= 400 =>
           failed += 1
           Logger.error("HTTP error "+st+" at "+url)
         case SkippedContentType(contentType) => ignored += 1
@@ -299,7 +299,7 @@ class CrawlStatisticsActor extends Actor {
     val fromStart = (System.nanoTime()-start)/1000000000.0
     val fromLast = (System.nanoTime()-lastStats.running)/1000000000.0
     val crawlsInPeriod = total-lastStats.total
-    val bytesInPeriod = bytes-lastStats.total
+    val bytesInPeriod = bytes-lastStats.bytes
     val durationInPeriod = duration-lastStats.duration
     "<pre>" +
       ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, running for %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
