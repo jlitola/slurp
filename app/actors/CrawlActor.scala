@@ -303,8 +303,8 @@ class CrawlStatisticsActor extends Actor {
     val durationInPeriod = duration-lastStats.duration
     "<pre>" +
       ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, running for %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
-      ("from start:  total %.2f 1/s, %.2f kBs, avg response %.2fms\n" format (total/fromStart, bytes/fromStart/1024.0, if(total != 0) duration/total/1000000.0 else 0.0)) +
-      ("last period: total %.2f 1/s, %.2f kBs, avg response %.2fms\n" format (crawlsInPeriod/fromLast, bytesInPeriod/fromLast/1024.0, if(crawlsInPeriod!=0) durationInPeriod/crawlsInPeriod/1000000.0 else 0.0)) +
+      ("from start:  total %.2f 1/s, %.2f kBs, avg response %.2fms, avg page size %.2fkB\n" format (total/fromStart, bytes/fromStart/1024.0, if(total != 0) duration/total/1000000.0 else 0.0, if(total !=0) bytes/total else 0.0)) +
+      ("last period: total %.2f 1/s, %.2f kBs, avg response %.2fms, avg page size %.2fkB\n" format (crawlsInPeriod/fromLast, bytesInPeriod/fromLast/1024.0, if(crawlsInPeriod!=0) durationInPeriod/crawlsInPeriod/1000000.0 else 0.0), if (crawlsInPeriod!=0) bytesInPeriod/crawlsInPeriod) +
     "</pre>"
   }
 
