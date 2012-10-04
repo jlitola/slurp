@@ -36,7 +36,7 @@ case class LinksFound(urls: Seq[URL])
 /// Request for Crawl statistics
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
-case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, redirect : Int, timeout : Int, running : Long, bytes : Long)
+case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, redirect : Int, timeout : Int, duration : Long, running : Long, bytes : Long)
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
@@ -244,10 +244,11 @@ class CrawlStatisticsActor extends Actor {
   var redirect = 0
   var totalSites = 0
   var pendingSites = 0
+  var duration : Long = 0
   var bytes : Long = 0
   val start = System.nanoTime()
   var listeners = Seq.empty[PushEnumerator[String]]
-  var lastStats = CrawlStatistics(0,0,0,0, 0,0, System.nanoTime(),0)
+  var lastStats = CrawlStatistics(0,0,0,0, 0,0, 0, System.nanoTime(),0)
 
   Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
 
@@ -255,9 +256,10 @@ class CrawlStatisticsActor extends Actor {
     case "tick" =>
       CrawlManager.ref ! ManagerStatisticsRequest()
 
-    case CrawlResult(url, status, duration, size, links) =>
+    case CrawlResult(url, status, d, size, links) =>
       total += 1
       bytes += size
+      duration += d
       status match {
         case CrawlHttpStatus(200 | 202 | 204) => success += 1
         case CrawlHttpStatus(301 | 302) =>
@@ -276,7 +278,7 @@ class CrawlStatisticsActor extends Actor {
     case CrawlStatisticsRequest() =>
       Logger.debug("Received statistics request")
       listeners.foreach(_.push(statsHtml))
-      lastStats = CrawlStatistics(total, success, failed, ignored, timeout, redirect, System.nanoTime(), bytes)
+      lastStats = CrawlStatistics(total, success, failed, ignored, timeout, redirect, duration, System.nanoTime(), bytes)
 
     case ManagerStatistics(t, p) => totalSites = t; pendingSites = p
 
@@ -296,9 +298,13 @@ class CrawlStatisticsActor extends Actor {
   def statsHtml = {
     val fromStart = (System.nanoTime()-start)/1000000000.0
     val fromLast = (System.nanoTime()-lastStats.running)/1000000000.0
+    val crawlsInPeriod = total-lastStats.total
+    val bytesInPeriod = bytes-lastStats.total
+    val durationInPeriod = duration-lastStats.duration
     "<pre>" +
-      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, duration %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
-      ("delta crawls: total %.2f 1/s, %.2f kBs" format ((total-lastStats.total)/fromLast, (bytes-lastStats.bytes)/fromLast/1024.0)) +
+      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, running for %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
+      ("from start:  total %.2f 1/s, %.2f kBs, avg response %.2fms\n" format (total/fromStart, bytes/fromStart/1024.0, if(total != 0) duration/total/1000000.0 else 0.0)) +
+      ("last period: total %.2f 1/s, %.2f kBs, avg response %.2fms\n" format (crawlsInPeriod/fromLast, bytesInPeriod/fromLast/1024.0, if(crawlsInPeriod!=0) durationInPeriod/crawlsInPeriod/1000000.0 else 0.0)) +
     "</pre>"
   }
 
