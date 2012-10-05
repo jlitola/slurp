@@ -349,9 +349,9 @@ class CrawlManager(val concurrency : Int) extends Actor {
                   val (filtered, visited) = paths.partition( redisClient.zscore("visited:"+newSite, _).isEmpty )
                   if (visited.nonEmpty) redisClient.srem("observed:"+newSite, visited.head, visited.tail.toSeq : _*)
                   if (filtered.nonEmpty)
-                    launchSiteActor(newSite, filtered.flatten.flatMap { url =>
+                    launchSiteActor(newSite, filtered.flatten.flatMap { path =>
                       try {
-                        Some(new URL(url))
+                        Some(new URL(site+path))
                       } catch {
                         case _ => None
                       }
