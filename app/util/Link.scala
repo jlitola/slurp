@@ -13,6 +13,7 @@ object LinkUtility {
   val LinkPattern = """(?s)(<a.*?>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
   val HRef = """.*\bhref\s*=\s*(?:"([^"\s]+)"|'([^'\s]+)'|([^"'\s]+)).*""".r
+  val ValidURL = """[\w\d:#@%/;$()~_?\+-=\\\.&]*""".r
   val Anchor = """#.*""".r
 
   def getPath(url : URL ) = {
@@ -30,19 +31,23 @@ object LinkUtility {
           if (url1!=null) url1
             else if (url2!=null) url2
             else url3
-        val trimmedUrl = Anchor.replaceFirstIn(url, "")
-        try {
-          val computedUrl = baseURL match {
-              case Some(base) => new URL(base, trimmedUrl)
-              case None => new URL(trimmedUrl)
+        url match {
+          case ValidURL() =>
+            val trimmedUrl = Anchor.replaceFirstIn(url, "")
+            try {
+              val computedUrl = baseURL match {
+                case Some(base) => new URL(base, trimmedUrl)
+                case None => new URL(trimmedUrl)
+              }
+              val proto = computedUrl.getProtocol
+              if(proto.equals("http") || proto.equals("https"))
+                Some(computedUrl)
+              else
+                None
+            } catch {
+              case e: MalformedURLException => None
             }
-          val proto = computedUrl.getProtocol
-          if(proto.equals("http") || proto.equals("https"))
-            Some(computedUrl)
-          else
-            None
-        } catch {
-          case e: MalformedURLException => None
+          case _ => None
         }
       case _ => None
     }

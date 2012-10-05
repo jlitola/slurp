@@ -98,13 +98,14 @@ class CrawlActor(statsActor : ActorRef) extends Actor {
  * @param site Domain of the site
  * @param concurrency How many concurrent crawlers to use
  */
-class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
+class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) extends Actor {
   val pending = mutable.Set.empty[String]
   var active = Seq.empty[String]
   var visited = Map.empty[String, Long]
   var stopping = false
   var notified = false
   lazy val robots : RobotsExclusion = fetchRobots()
+  val deadLine = System.currentTimeMillis()+ttl*1000;
 
   def receive = {
     case LinksFound(urls) =>
@@ -136,13 +137,15 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
 
       pending ++= local.map(getPath(_)).filterNot( visited.contains( _ ) )
 
-      var done = false
-      while(!done && pending.nonEmpty) {
-        val path = pending.head
-        pending.remove(path)
-        if (shouldCrawl(path)) {
-          launchCrawl(path)
-          done = true
+      if(System.currentTimeMillis < deadLine) {
+        var done = false
+        while(!done && pending.nonEmpty) {
+          val path = pending.head
+          pending.remove(path)
+          if (shouldCrawl(path)) {
+            launchCrawl(path)
+            done = true
+          }
         }
       }
 
@@ -224,7 +227,7 @@ class SiteActor(val site : String, val concurrency : Int = 2) extends Actor {
   def addUrl(url: URL)(implicit r: RedisClient) {
     val path = getPath(url)
     if (shouldCrawl(path)) {
-      if (active.size < concurrency) {
+      if (active.size < concurrency && System.currentTimeMillis < deadLine) {
         launchCrawl(path)
       } else {
         pending += path
@@ -400,7 +403,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
   def launchSiteActor(site : String, urls : Seq[URL]) {
     Logger.info("Creating new site actor for "+site)
-    val actor = context.actorOf(Props(new SiteActor(site)).withDispatcher("play.akka.actor.site-dispatcher"))
+    val actor = context.actorOf(Props(new SiteActor(site, ttl = Play.configuration.getInt("slurp.site.ttl").getOrElse(300))).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
 
