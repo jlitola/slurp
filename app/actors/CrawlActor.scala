@@ -115,7 +115,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       }
 
     case CrawlResult(url, status, duration, size, links) =>
-      active = active.filterNot(_ equals getPath(url))
+      val path = getPath(url)
+      active = active.filterNot(_ equals path)
       val time = System.currentTimeMillis
       val urlString = url.toString
 
@@ -125,8 +126,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
         redis.withClient {
           implicit r =>
 
-            r.srem("observed:" + site, urlString)
-            r.zadd("visited:" + site, time, urlString)
+            r.srem("observed:" + site, path)
+            r.zadd("visited:" + site, time, path)
         }
       }
       visited = visited + (getPath(url) -> time)
@@ -173,8 +174,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
     redis.withClient { r=>
       r.zrangeWithScore("visited:"+site, 0, -1) map { l =>
         visited = visited ++ l.map { v =>
-          val (url, score) = (v._1, v._2)
-          (getPath(new URL(url)) -> score.asInstanceOf[Long])
+          val (path, score) = (v._1, v._2)
+          (path -> score.asInstanceOf[Long])
         }
       }
     }
@@ -344,8 +345,8 @@ class CrawlManager(val concurrency : Int) extends Actor {
             Logger.info("Trying to find new site to crawl")
             redisClient.spop("observed_sites").foreach { newSite : String =>
               if (! active.contains(newSite)) {
-                redisClient.smembers("observed:"+newSite) map { urls =>
-                  val (filtered, visited) = urls.partition( redisClient.zscore("visited:"+newSite, _).isEmpty )
+                redisClient.smembers("observed:"+newSite) map { paths =>
+                  val (filtered, visited) = paths.partition( redisClient.zscore("visited:"+newSite, _).isEmpty )
                   if (visited.nonEmpty) redisClient.srem("observed:"+newSite, visited.head, visited.tail.toSeq : _*)
                   if (filtered.nonEmpty)
                     launchSiteActor(newSite, filtered.flatten.flatMap { url =>
@@ -393,9 +394,10 @@ class CrawlManager(val concurrency : Int) extends Actor {
       queued.collect {
         case Some(v) =>
           val (site, urls) = (v._1, v._2)
+          val paths = urls map {getPath(_)}
           redis.withClient { r =>
             r.sadd("observed_sites", site)
-            r.sadd("observed:"+site, urls.head, urls.tail : _*)
+            r.sadd("observed:"+site, paths.head, paths.tail : _*)
           }
       }
     }
