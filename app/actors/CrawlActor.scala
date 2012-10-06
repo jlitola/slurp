@@ -7,6 +7,7 @@ import play.api.Play.current
 import akka.util.duration._
 import play.api.{Play, Logger}
 import collection._
+import akka.pattern.ask
 import immutable.HashSet
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
@@ -16,6 +17,10 @@ import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
 import akka.dispatch.{Future, ExecutionContext}
+import java.io.{BufferedReader, FileReader, FileWriter, File}
+import io.Source
+import java.util.UUID
+import akka.util.Timeout
 
 /**
  */
@@ -37,6 +42,11 @@ case class LinksFound(urls: Seq[URL])
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
 case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, redirect : Int, timeout : Int, duration : Long, running : Long, bytes : Long)
+
+case class VisitedSite(site : String, paths : Seq[String])
+case class RequestSite()
+case class ObservedSite(site : String, paths : Seq[String])
+case class NoObservedSites()
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
@@ -125,8 +135,6 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       Future {
         redis.withClient {
           implicit r =>
-
-            r.srem("observed:" + site, path)
             r.zadd("visited:" + site, time, path)
         }
       }
@@ -152,8 +160,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
 
       if (active.isEmpty) {
         if (stopping) {
-          Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
-          context.stop(self)
+          stopActor()
         } else
           notifyCrawlFinished()
       }
@@ -162,10 +169,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
     case Stop() =>
       Logger.info("Received Stop signal for "+site)
       stopping = true
-      if (active.isEmpty) {
-        Logger.info("Stopping site "+site+" context as there is no activity")
-        context.stop(self)
-      }
+      if (active.isEmpty)
+        stopActor()
 
     case msg @ _ => Logger.warn("Unknown message! "+msg)
   }
@@ -189,7 +194,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   override def postStop() {
     visited = Map.empty
     active = Seq.empty
-    pending.clear
+    pending.clear()
   }
 
   def notifyCrawlFinished() {
@@ -198,6 +203,16 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       context.parent ! SiteCrawlFinished(site)
       notified = true
     }
+  }
+
+  /**
+   * Stop the actor, but first notify about visited sited, and remaining observed sites
+   */
+  private def stopActor() {
+    Logger.info("Stopping site "+site+" context as there is no activity")
+    CrawlManager.observed ! ObservedSite(site, pending.toSeq)
+    CrawlManager.observed ! VisitedSite(site, visited.keys.toSeq)
+    context.stop(self)
   }
 
   def fetchRobots() : RobotsExclusion = {
@@ -322,6 +337,7 @@ class CrawlStatisticsActor extends Actor {
 class CrawlManager(val concurrency : Int) extends Actor {
   val active : mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
   lazy val redisClient : RedisClient = redis.pool.borrowObject().asInstanceOf[RedisClient]
+  implicit val timeout = Timeout(5000)
 
   override def postStop() {
     redis.pool.returnObject(redisClient)
@@ -341,25 +357,23 @@ class CrawlManager(val concurrency : Int) extends Actor {
       active.get(site).filter(_ == sender).foreach { a =>
         Logger.info("Site "+site+" was in list of active crawls")
         active.remove(site) map { actor =>
+          var sitesLeft = true
           do {
             Logger.info("Trying to find new site to crawl")
-            redisClient.spop("observed_sites").foreach { newSite : String =>
-              if (! active.contains(newSite)) {
-                redisClient.smembers("observed:"+newSite) map { paths =>
-                  val (filtered, visited) = paths.partition( redisClient.zscore("visited:"+newSite, _).isEmpty )
-                  if (visited.nonEmpty) redisClient.srem("observed:"+newSite, visited.head, visited.tail.toSeq : _*)
-                  if (filtered.nonEmpty)
-                    launchSiteActor(newSite, filtered.flatten.flatMap { path =>
-                      try {
-                        Some(new URL(site+path))
-                      } catch {
-                        case _ => None
-                      }
-                    }.toSeq)
+            (CrawlManager.observed ? RequestSite()).map { msg => msg match {
+              case ObservedSite(newSite, paths) =>
+                if (! active.contains(newSite)) {
+                  launchSiteActor(newSite, paths.flatMap { path =>
+                    try {
+                      Some(new URL(newSite+path))
+                    } catch {
+                      case _ => None
+                    }
+                  }.toSeq)
                 }
-              }
-            }
-          } while(active.size<concurrency && redisClient.scard("observed_sites").getOrElse(0) > 0)
+              case NoObservedSites() => sitesLeft = false
+            }}
+          } while(active.size<concurrency && sitesLeft)
         }
       }
 
@@ -372,33 +386,27 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   def registerLink(urls : Seq[URL]) {
-    val queued = urls groupBy (LinkUtility.baseUrl(_)) map { a =>
+    val sites = ( urls.groupBy {LinkUtility.baseUrl(_)} map { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
         case Some(actor) =>
           actor ! LinksFound(siteUrls)
-          None
         case None =>
           if (active.size < concurrency) {
             launchSiteActor(site, siteUrls)
-            None
           } else {
-            Some(Tuple2(site, siteUrls))
+            CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
           }
       }
-    }
+      site
+    } toList )
+
     implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.redis-dispatcher")
 
     Future {
-      queued.collect {
-        case Some(v) =>
-          val (site, urls) = (v._1, v._2)
-          val paths = urls map {getPath(_)}
-          redis.withClient { r =>
-            r.sadd("observed_sites", site)
-            r.sadd("observed:"+site, paths.head, paths.tail : _*)
-          }
+      redis.withClient { r =>
+        r.sadd("observed_sites", sites.head, sites.tail : _*)
       }
     }
 
@@ -412,11 +420,61 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 }
 
+/**
+ * Class for managing observed urls
+ */
+class ObservedManager extends Actor {
+  def receive = {
+    case ObservedSite(site, paths) =>
+      writeSiteFile(site, paths)
+
+    case RequestSite() =>
+      redis.withClient { r =>
+        r.spop("observed_sites") match {
+          case Some(site) =>
+            try {
+              val paths = Source.fromFile(siteFile(site)).getLines().toList.distinct
+
+              sender ! ObservedSite(site, paths)
+            } catch {
+              case _ => sender ! NoObservedSites()
+            }
+          case None => sender ! NoObservedSites()
+        }
+      }
+
+    case VisitedSite(site, paths) =>
+      val file = siteFile(site)
+      val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
+      if(file.renameTo(tempFile)) {
+        val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
+        val remaining = observed -- paths
+        if (remaining.nonEmpty)
+          writeSiteFile(site, remaining.toSeq)
+        tempFile.delete()
+      }
+  }
+
+  def writeSiteFile(site : String, paths : Seq[String]) {
+    val f = new FileWriter(siteFile(site), true)
+    try {
+      val result = paths.foldLeft(new StringBuilder) { (sb, path) =>
+        sb.append(path).append("\n")
+      }.toString()
+      f.write(result)
+    } finally f.close()
+
+  }
+  private def siteFile(site : String) = new File("sites", site.replaceAll("//", ""))
+}
+
+
 object CrawlManager {
   lazy val system = Akka.system
   lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
+  lazy val observed = system.actorOf(Props[ObservedManager].withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.redis-dispatcher"))
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
