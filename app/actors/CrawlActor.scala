@@ -119,18 +119,14 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
 
   def receive = {
     case LinksFound(urls) =>
-      redis.withClient {
-        implicit r =>
-          urls foreach ( addUrl(_) )
-      }
+      urls foreach ( addUrl(_) )
 
     case CrawlResult(url, status, duration, size, links) =>
       val path = getPath(url)
       active = active.filterNot(_ equals path)
       val time = System.currentTimeMillis
-      val urlString = url.toString
 
-      implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.redis-dispatcher")
+      implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.io-dispatcher")
 
       Future {
         redis.withClient {
@@ -240,7 +236,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
    * Add url for processing
    * @return Whether url was accepted
    */
-  def addUrl(url: URL)(implicit r: RedisClient) {
+  def addUrl(url: URL) {
     val path = getPath(url)
     if (shouldCrawl(path)) {
       if (active.size < concurrency && System.currentTimeMillis < deadLine) {
@@ -394,7 +390,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
           actor ! LinksFound(siteUrls)
         case None =>
           if (active.size < concurrency) {
-            launchSiteActor(site, siteUrls)
+            launchSiteActor(site , siteUrls)
           } else {
             CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
           }
@@ -408,6 +404,11 @@ class CrawlManager(val concurrency : Int) extends Actor {
     active.put(site, actor)
     actor ! LinksFound(urls)
   }
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("CrawlManager got restarted due %s with message %s" format(reason, message))
+    super.preRestart(reason,message)
+  }
+
 }
 
 /**
@@ -466,6 +467,12 @@ class ObservedManager extends Actor {
 
   }
   private def siteFile(site : String) = new File("sites", site.replaceAll("//", ""))
+
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("ObservedManager got restarted due %s with message %s" format(reason, message))
+    super.preRestart(reason,message)
+  }
+
 }
 
 
@@ -474,7 +481,7 @@ object CrawlManager {
   lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
-  lazy val observed = system.actorOf(Props[ObservedManager].withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.redis-dispatcher"))
+  lazy val observed = system.actorOf(Props[ObservedManager].withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.io-dispatcher"))
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
