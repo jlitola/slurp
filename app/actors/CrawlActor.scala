@@ -7,7 +7,8 @@ import play.api.Play.current
 import akka.util.duration._
 import play.api.{Play, Logger}
 import collection._
-import immutable.HashSet
+import akka.pattern.ask
+import immutable.{HashMap, HashSet}
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
@@ -15,7 +16,13 @@ import util.{HttpError, UnsupportedContentType, LinkUtility, RobotsExclusion}
 import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
-import akka.dispatch.{Future, ExecutionContext}
+import akka.dispatch.{Await, Future, ExecutionContext}
+import java.io._
+import io.Source
+import java.util.UUID
+import akka.util.Timeout
+import scala.Some
+import akka.actor.DeadLetter
 
 /**
  */
@@ -37,6 +44,11 @@ case class LinksFound(urls: Seq[URL])
 case class CrawlStatisticsRequest()
 /// Current statistics for the crawl
 case class CrawlStatistics(total: Int, success : Int, failed : Int, ignored : Int, redirect : Int, timeout : Int, duration : Long, running : Long, bytes : Long)
+
+case class VisitedSite(site : String, paths : Seq[String])
+case class RequestSite()
+case class ObservedSite(site : String, paths : Seq[String])
+case class NoObservedSites()
 
 case class ManagerStatisticsRequest()
 case class ManagerStatistics(activeSites : Int, pendingSites : Int)
@@ -102,31 +114,31 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   val pending = mutable.Set.empty[String]
   var active = Seq.empty[String]
   var visited = Map.empty[String, Long]
+  var pathsCrawled = 0
   var stopping = false
   var notified = false
   lazy val robots : RobotsExclusion = fetchRobots()
-  val deadLine = System.currentTimeMillis()+ttl*1000;
+  val deadLine = System.currentTimeMillis()+ttl*1000
 
   def receive = {
     case LinksFound(urls) =>
-      redis.withClient {
-        implicit r =>
-          urls foreach ( addUrl(_) )
+      urls foreach ( addUrl(_) )
+      if(active.isEmpty) {
+        Logger.error("Active is empty after adding urls for site "+site)
+        notifyCrawlFinished()
       }
 
     case CrawlResult(url, status, duration, size, links) =>
+      pathsCrawled += 1
       val path = getPath(url)
       active = active.filterNot(_ equals path)
       val time = System.currentTimeMillis
-      val urlString = url.toString
 
-      implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.redis-dispatcher")
+      implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.io-dispatcher")
 
       Future {
         redis.withClient {
           implicit r =>
-
-            r.srem("observed:" + site, path)
             r.zadd("visited:" + site, time, path)
         }
       }
@@ -152,8 +164,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
 
       if (active.isEmpty) {
         if (stopping) {
-          Logger.info("Stopping site "+site+" context as we ran out of work and are stopping")
-          context.stop(self)
+          stopActor()
         } else
           notifyCrawlFinished()
       }
@@ -162,10 +173,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
     case Stop() =>
       Logger.info("Received Stop signal for "+site)
       stopping = true
-      if (active.isEmpty) {
-        Logger.info("Stopping site "+site+" context as there is no activity")
-        context.stop(self)
-      }
+      if (active.isEmpty)
+        stopActor()
 
     case msg @ _ => Logger.warn("Unknown message! "+msg)
   }
@@ -189,7 +198,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   override def postStop() {
     visited = Map.empty
     active = Seq.empty
-    pending.clear
+    pending.clear()
   }
 
   def notifyCrawlFinished() {
@@ -198,6 +207,18 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       context.parent ! SiteCrawlFinished(site)
       notified = true
     }
+  }
+
+  /**
+   * Stop the actor, but first notify about visited sited, and remaining observed sites
+   */
+  private def stopActor() {
+    Logger.info("Stopping site "+site+" context as there is no activity")
+    if(pending.nonEmpty)
+      CrawlManager.observed ! ObservedSite(site, pending.toSeq)
+    if(pathsCrawled > 0)
+      CrawlManager.observed ! VisitedSite(site, visited.keys.toSeq)
+    context.stop(self)
   }
 
   def fetchRobots() : RobotsExclusion = {
@@ -225,7 +246,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
    * Add url for processing
    * @return Whether url was accepted
    */
-  def addUrl(url: URL)(implicit r: RedisClient) {
+  def addUrl(url: URL) {
     val path = getPath(url)
     if (shouldCrawl(path)) {
       if (active.size < concurrency && System.currentTimeMillis < deadLine) {
@@ -322,6 +343,7 @@ class CrawlStatisticsActor extends Actor {
 class CrawlManager(val concurrency : Int) extends Actor {
   val active : mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
   lazy val redisClient : RedisClient = redis.pool.borrowObject().asInstanceOf[RedisClient]
+  implicit val timeout = Timeout(5000)
 
   override def postStop() {
     redis.pool.returnObject(redisClient)
@@ -341,27 +363,27 @@ class CrawlManager(val concurrency : Int) extends Actor {
       active.get(site).filter(_ == sender).foreach { a =>
         Logger.info("Site "+site+" was in list of active crawls")
         active.remove(site) map { actor =>
-          do {
-            Logger.info("Trying to find new site to crawl")
-            redisClient.spop("observed_sites").foreach { newSite : String =>
-              if (! active.contains(newSite)) {
-                redisClient.smembers("observed:"+newSite) map { paths =>
-                  val (filtered, visited) = paths.partition( redisClient.zscore("visited:"+newSite, _).isEmpty )
-                  if (visited.nonEmpty) redisClient.srem("observed:"+newSite, visited.head, visited.tail.toSeq : _*)
-                  if (filtered.nonEmpty)
-                    launchSiteActor(newSite, filtered.flatten.flatMap { path =>
-                      try {
-                        Some(new URL(site+path))
-                      } catch {
-                        case _ => None
-                      }
-                    }.toSeq)
-                }
-              }
-            }
-          } while(active.size<concurrency && redisClient.scard("observed_sites").getOrElse(0) > 0)
+          Logger.info("Trying to find new site to crawl")
+          CrawlManager.observed ! RequestSite()
         }
       }
+
+    case ObservedSite(newSite, paths) =>
+      if (active.size<concurrency)
+        if (! active.contains(newSite)) {
+          launchSiteActor(newSite, paths.flatMap { path =>
+            try {
+              Some(new URL(newSite+path))
+            } catch {
+              case _ => None
+            }
+          }.toSeq)
+        }
+
+      if (active.size<concurrency)
+        CrawlManager.observed ! RequestSite()
+
+    case NoObservedSites() =>
 
     case ManagerStatisticsRequest() =>
       Logger.info("Responding to ManagerStatisticsRequest")
@@ -372,57 +394,204 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   def registerLink(urls : Seq[URL]) {
-    val queued = urls groupBy (LinkUtility.baseUrl(_)) map { a =>
+    urls.groupBy {LinkUtility.baseUrl(_)} foreach { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
         case Some(actor) =>
           actor ! LinksFound(siteUrls)
-          None
         case None =>
           if (active.size < concurrency) {
-            launchSiteActor(site, siteUrls)
-            None
+            launchSiteActor(site , siteUrls)
           } else {
-            Some(Tuple2(site, siteUrls))
-          }
-      }
-    }
-    implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.redis-dispatcher")
-
-    Future {
-      queued.collect {
-        case Some(v) =>
-          val (site, urls) = (v._1, v._2)
-          val paths = urls map {getPath(_)}
-          redis.withClient { r =>
-            r.sadd("observed_sites", site)
-            r.sadd("observed:"+site, paths.head, paths.tail : _*)
+            CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
           }
       }
     }
 
   }
   def launchSiteActor(site : String, urls : Seq[URL]) {
-    Logger.info("Creating new site actor for "+site)
+    Logger.info("Creating new site actor for %s and seeding it with %d paths" format (site, urls.size))
     val actor = context.actorOf(Props(new SiteActor(site, ttl = Play.configuration.getInt("slurp.site.ttl").getOrElse(300))).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
+  }
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("CrawlManager got restarted due %s with message %s" format(reason, message))
+    super.preRestart(reason,message)
+  }
+
+}
+
+
+
+/**
+ * Class for managing observed urls
+ */
+class ObservedManager extends Actor {
+  var observed = HashMap.empty[String, HashSet[String]]
+  var visited = HashMap.empty[String, HashSet[String]]
+  var flusher : Option[Cancellable] = None
+  case class FlushData()
+  case class FilteredSite(site : String, path : Seq[String])
+
+  override def preStart() {
+    val interval : Int = Play.configuration.getInt("slurp.observed.flush-interval").getOrElse(60)
+    context.system.scheduler.schedule(interval seconds, interval seconds, self, FlushData())
+  }
+  override def postStop() {
+    flusher.map (_.cancel())
+  }
+
+  def receive = {
+    case ObservedSite(site, paths) =>
+      val siteKey = "visited:"+site
+
+      implicit val ec : ExecutionContext = context.dispatcher
+
+      Future {
+        redis.withClient { r=>
+          val filtered = paths.filter(r.zscore(siteKey, _).isEmpty)
+          if(filtered.nonEmpty)
+            self ! FilteredSite(site, filtered)
+        }
+      }
+
+    case FilteredSite(site, paths) =>
+      observed.get(site) match {
+        case Some(p) =>
+          observed = observed.updated(site, p ++ paths)
+        case None =>
+          observed = observed.updated(site, HashSet.empty ++ paths)
+      }
+
+    case VisitedSite(site, paths) =>
+      visited.get(site) match {
+        case Some(p) =>
+          visited = visited.updated(site, p++paths)
+        case None =>
+          visited = visited.updated(site, HashSet.empty ++ paths)
+      }
+
+      observed.get(site).foreach { p =>
+        val remaining = p -- paths
+        if(remaining.nonEmpty)
+          observed = observed.updated(site, remaining)
+        else
+          observed = observed - site
+      }
+
+    case FlushData() =>
+      val currentObserved = observed
+      val currentVisited = visited
+      visited = HashMap.empty
+      observed = HashMap.empty
+
+      implicit val ec : ExecutionContext = context.dispatcher
+
+      Future {
+        currentObserved.foreach { t =>
+          val (site, paths) = (t._1, t._2)
+          writeSiteFile(site, paths.toSeq)
+          redis.withClient { r =>
+            r.sadd("observed_sites", site)
+          }
+        }
+
+        currentVisited.foreach { t=>
+          val (site, paths) = (t._1, t._2)
+          val start = System.nanoTime
+          val file = siteFile(site)
+          val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
+          if(file.renameTo(tempFile)) {
+            val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
+            val remaining = observed -- paths
+            if (remaining.nonEmpty)
+              writeSiteFile(site, remaining.toSeq)
+            else
+              redis.withClient { r =>
+                r.srem("observed_sites", site)
+              }
+            tempFile.delete()
+          }
+          Logger.info("Compacting %s took %d ms" format (site, (System.nanoTime-start)/1000/1000))
+        }
+      }
+
+
+    case RequestSite() =>
+      // First check if we have anything in memory
+      if (observed.nonEmpty) {
+        val t = observed.head
+        val (site, paths) = (t._1, t._2)
+        Logger.info("Returning site %s from memory. %d paths" format (site, paths.size))
+        observed = observed - site
+        sender ! ObservedSite(site, paths.toSeq)
+      } else {
+        // If not, then just check from the disk in future
+        val origin = sender
+        implicit val ec : ExecutionContext = context.dispatcher
+        Future {
+          redis.withClient { r =>
+            var msg : Option[Any] = None
+            do {
+              msg = r.spop("observed_sites") match {
+                case Some(site) =>
+                  try {
+                    val paths = Source.fromFile(siteFile(site)).getLines().take(500).toList.distinct
+
+                    if (paths.nonEmpty) {
+                      Logger.info("Returning site %s from disk. %d paths" format (site, paths.size))
+                      Some(ObservedSite(site, paths))
+                    } else None
+                  } catch {
+                    case _ => None
+                  }
+                case None => None
+              }
+            } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
+            msg match {
+              case Some(m) =>
+                origin ! m
+              case None => origin ! NoObservedSites()
+            }
+          }
+        }
+      }
 
   }
+
+  private def writeSiteFile(site : String, paths : Seq[String]) {
+    val f = new BufferedWriter(new FileWriter(siteFile(site), true))
+    try {
+      paths.foreach { path =>
+        f.write(path+"\n")
+      }
+    } finally f.close()
+
+  }
+  private def siteFile(site : String) = new File("sites", site.replaceAll("//", ""))
+
+  override def preRestart(reason : Throwable , message : Option[Any]) {
+    Logger.error("ObservedManager got restarted due %s with message %s" format(reason, message))
+    super.preRestart(reason,message)
+  }
+
 }
+
 
 object CrawlManager {
   lazy val system = Akka.system
   lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
+  lazy val observed = system.actorOf(Props[ObservedManager].withDispatcher("play.akka.actor.io-dispatcher"))
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
   val listener = system.actorOf(Props(new Actor {
     def receive = {
-      case d: DeadLetter => Logger.error(d.toString)
+      case d: DeadLetter => Logger.error(d.toString())
     }
   }))
   system.eventStream.subscribe(listener, classOf[DeadLetter])
