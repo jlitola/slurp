@@ -16,7 +16,7 @@ import util.{HttpError, UnsupportedContentType, LinkUtility, RobotsExclusion}
 import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
-import akka.dispatch.{Future, ExecutionContext}
+import akka.dispatch.{Await, Future, ExecutionContext}
 import java.io.{BufferedReader, FileReader, FileWriter, File}
 import io.Source
 import java.util.UUID
@@ -360,7 +360,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
           var sitesLeft = true
           do {
             Logger.info("Trying to find new site to crawl")
-            (CrawlManager.observed ? RequestSite()).map { msg => msg match {
+            Await.result(CrawlManager.observed ? RequestSite(), 5 seconds) match {
               case ObservedSite(newSite, paths) =>
                 if (! active.contains(newSite)) {
                   launchSiteActor(newSite, paths.flatMap { path =>
@@ -372,7 +372,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
                   }.toSeq)
                 }
               case NoObservedSites() => sitesLeft = false
-            }}
+            }
           } while(active.size<concurrency && sitesLeft)
         }
       }
@@ -386,7 +386,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   def registerLink(urls : Seq[URL]) {
-    val sites = ( urls.groupBy {LinkUtility.baseUrl(_)} map { a =>
+    urls.groupBy {LinkUtility.baseUrl(_)} foreach { a =>
       val (site, siteUrls) = (a._1, a._2)
 
       active.get(site) match {
@@ -399,15 +399,6 @@ class CrawlManager(val concurrency : Int) extends Actor {
             CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
           }
       }
-      site
-    } toList )
-
-    implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.redis-dispatcher")
-
-    Future {
-      redis.withClient { r =>
-        r.sadd("observed_sites", sites.head, sites.tail : _*)
-      }
     }
 
   }
@@ -416,7 +407,6 @@ class CrawlManager(val concurrency : Int) extends Actor {
     val actor = context.actorOf(Props(new SiteActor(site, ttl = Play.configuration.getInt("slurp.site.ttl").getOrElse(300))).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
-
   }
 }
 
@@ -427,18 +417,28 @@ class ObservedManager extends Actor {
   def receive = {
     case ObservedSite(site, paths) =>
       writeSiteFile(site, paths)
+      redis.withClient { r =>
+        r.sadd("observed_sites", site)
+      }
 
     case RequestSite() =>
       redis.withClient { r =>
-        r.spop("observed_sites") match {
+        var msg : Option[Any] = None
+        do {
+          msg = r.spop("observed_sites") match {
           case Some(site) =>
             try {
               val paths = Source.fromFile(siteFile(site)).getLines().toList.distinct
 
-              sender ! ObservedSite(site, paths)
+              Some(ObservedSite(site, paths))
             } catch {
-              case _ => sender ! NoObservedSites()
+              case _ => None
             }
+          case None => None
+        }
+        } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
+        msg match {
+          case Some(msg) => sender ! msg
           case None => sender ! NoObservedSites()
         }
       }
