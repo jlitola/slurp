@@ -353,25 +353,25 @@ class CrawlManager(val concurrency : Int) extends Actor {
       active.get(site).filter(_ == sender).foreach { a =>
         Logger.info("Site "+site+" was in list of active crawls")
         active.remove(site) map { actor =>
-          var sitesLeft = true
-          do {
-            Logger.info("Trying to find new site to crawl")
-            Await.result(CrawlManager.observed ? RequestSite(), 5 seconds) match {
-              case ObservedSite(newSite, paths) =>
-                if (! active.contains(newSite)) {
-                  launchSiteActor(newSite, paths.flatMap { path =>
-                    try {
-                      Some(new URL(newSite+path))
-                    } catch {
-                      case _ => None
-                    }
-                  }.toSeq)
-                }
-              case NoObservedSites() => sitesLeft = false
-            }
-          } while(active.size<concurrency && sitesLeft)
+          Logger.info("Trying to find new site to crawl")
+          CrawlManager.observed ! RequestSite()
         }
       }
+
+    case ObservedSite(newSite, paths) =>
+      if (active.size<concurrency)
+        if (! active.contains(newSite)) {
+          launchSiteActor(newSite, paths.flatMap { path =>
+            try {
+              Some(new URL(newSite+path))
+            } catch {
+              case _ => None
+            }
+          }.toSeq)
+        }
+
+      if (active.size<concurrency)
+        CrawlManager.observed ! RequestSite()
 
     case ManagerStatisticsRequest() =>
       Logger.info("Responding to ManagerStatisticsRequest")
@@ -445,6 +445,7 @@ class ObservedManager extends Actor {
       }
 
     case VisitedSite(site, paths) =>
+      val start = System.nanoTime
       val file = siteFile(site)
       val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
       if(file.renameTo(tempFile)) {
@@ -452,11 +453,16 @@ class ObservedManager extends Actor {
         val remaining = observed -- paths
         if (remaining.nonEmpty)
           writeSiteFile(site, remaining.toSeq)
+        else
+          redis.withClient { r =>
+            r.srem("observed_sites", site)
+          }
         tempFile.delete()
       }
+      Logger.info("Compacting %s took %d ms" format (site, System.nanoTime-start/1000/1000))
   }
 
-  def writeSiteFile(site : String, paths : Seq[String]) {
+  private def writeSiteFile(site : String, paths : Seq[String]) {
     val f = new FileWriter(siteFile(site), true)
     try {
       val result = paths.foldLeft(new StringBuilder) { (sb, path) =>
