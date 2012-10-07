@@ -465,10 +465,10 @@ class ObservedManager extends Actor {
   private def writeSiteFile(site : String, paths : Seq[String]) {
     val f = new FileWriter(siteFile(site), true)
     try {
-      val result = paths.foldLeft(new StringBuilder) { (sb, path) =>
-        sb.append(path).append("\n")
-      }.toString()
-      f.write(result)
+      paths.foreach { path =>
+        f.write(path)
+        f.write("\n")
+      }
     } finally f.close()
 
   }
