@@ -114,6 +114,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   val pending = mutable.Set.empty[String]
   var active = Seq.empty[String]
   var visited = Map.empty[String, Long]
+  var pathsCrawled = 0
   var stopping = false
   var notified = false
   lazy val robots : RobotsExclusion = fetchRobots()
@@ -126,6 +127,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
         notifyCrawlFinished()
 
     case CrawlResult(url, status, duration, size, links) =>
+      pathsCrawled += 1
       val path = getPath(url)
       active = active.filterNot(_ equals path)
       val time = System.currentTimeMillis
@@ -211,7 +213,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   private def stopActor() {
     Logger.info("Stopping site "+site+" context as there is no activity")
     CrawlManager.observed ! ObservedSite(site, pending.toSeq)
-    CrawlManager.observed ! VisitedSite(site, visited.keys.toSeq)
+    if(pathsCrawled > 0)
+      CrawlManager.observed ! VisitedSite(site, visited.keys.toSeq)
     context.stop(self)
   }
 
