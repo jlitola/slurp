@@ -425,6 +425,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
  */
 class ObservedManager extends Actor {
   val observed = mutable.HashMap.empty[String, HashSet[String]]
+  val visited = mutable.HashMap.empty[String, HashSet[String]]
   var flusher : Option[Cancellable] = None
   case class FlushData()
 
@@ -445,17 +446,37 @@ class ObservedManager extends Actor {
       }
 
     case FlushData() =>
-      val current = observed.empty
+      val currentObserved = observed.empty
+      val currentVisited = observed.empty
 
       implicit val ec : ExecutionContext = context.dispatcher
 
       Future {
-        current.foreach { t =>
+        currentObserved.foreach { t =>
           val (site, paths) = (t._1, t._2)
           writeSiteFile(site, paths.toSeq)
           redis.withClient { r =>
             r.sadd("observed_sites", site)
           }
+        }
+
+        currentVisited.foreach { t=>
+          val (site, paths) = (t._1, t._2)
+          val start = System.nanoTime
+          val file = siteFile(site)
+          val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
+          if(file.renameTo(tempFile)) {
+            val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
+            val remaining = observed -- paths
+            if (remaining.nonEmpty)
+              writeSiteFile(site, remaining.toSeq)
+            else
+              redis.withClient { r =>
+                r.srem("observed_sites", site)
+              }
+            tempFile.delete()
+          }
+          Logger.info("Compacting %s took %d ms" format (site, (System.nanoTime-start)/1000/1000))
         }
       }
 
@@ -497,28 +518,15 @@ class ObservedManager extends Actor {
       }
 
     case VisitedSite(site, paths) =>
-      observed.get(site).foreach { p =>
-        observed.update(site, p -- paths)
+      visited.get(site) match {
+        case Some(p) =>
+          visited.put(site, p++paths)
+        case None =>
+          visited.put(site, HashSet.empty ++ paths)
       }
 
-      implicit val ec : ExecutionContext = context.dispatcher
-      Future {
-        val start = System.nanoTime
-        val file = siteFile(site)
-        val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
-        if(file.renameTo(tempFile)) {
-          val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
-          val remaining = observed -- paths
-          if (remaining.nonEmpty)
-            writeSiteFile(site, remaining.toSeq)
-          else
-            redis.withClient { r =>
-              r.srem("observed_sites", site)
-            }
-          tempFile.delete()
-        }
-        Logger.info("Compacting %s took %d ms" format (site, (System.nanoTime-start)/1000/1000))
-
+      observed.get(site).foreach { p =>
+        observed.update(site, p -- paths)
       }
   }
 
