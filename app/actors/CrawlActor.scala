@@ -451,7 +451,9 @@ class ObservedManager extends Actor {
 
       Future {
         redis.withClient { r=>
-         self ! FilteredSite(site, paths.filter(r.zscore(siteKey, _).isEmpty))
+          val filtered = paths.filter(r.zscore(siteKey, _).isEmpty)
+          if(filtered.nonEmpty)
+            self ! FilteredSite(site, filtered)
         }
       }
 
