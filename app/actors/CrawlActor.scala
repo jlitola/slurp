@@ -122,6 +122,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   def receive = {
     case LinksFound(urls) =>
       urls foreach ( addUrl(_) )
+      if(active.isEmpty && !stopping)
+        notifyCrawlFinished()
 
     case CrawlResult(url, status, duration, size, links) =>
       val path = getPath(url)
@@ -474,7 +476,7 @@ class ObservedManager extends Actor {
               msg = r.spop("observed_sites") match {
                 case Some(site) =>
                   try {
-                    val paths = Source.fromFile(siteFile(site)).getLines().toList.distinct
+                    val paths = Source.fromFile(siteFile(site)).getLines().take(500).toList.distinct
 
                     Some(ObservedSite(site, paths))
                   } catch {
