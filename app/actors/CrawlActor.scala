@@ -118,7 +118,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   var stopping = false
   var notified = false
   lazy val robots : RobotsExclusion = fetchRobots()
-  val deadLine = System.currentTimeMillis()+ttl*1000;
+  val deadLine = System.currentTimeMillis()+ttl*1000
 
   def receive = {
     case LinksFound(urls) =>
@@ -212,7 +212,8 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
    */
   private def stopActor() {
     Logger.info("Stopping site "+site+" context as there is no activity")
-    CrawlManager.observed ! ObservedSite(site, pending.toSeq)
+    if(pending.nonEmpty)
+      CrawlManager.observed ! ObservedSite(site, pending.toSeq)
     if(pathsCrawled > 0)
       CrawlManager.observed ! VisitedSite(site, visited.keys.toSeq)
     context.stop(self)
@@ -380,6 +381,8 @@ class CrawlManager(val concurrency : Int) extends Actor {
       if (active.size<concurrency)
         CrawlManager.observed ! RequestSite()
 
+    case NoObservedSites() =>
+
     case ManagerStatisticsRequest() =>
       Logger.info("Responding to ManagerStatisticsRequest")
       sender ! ManagerStatistics(active.size, redisClient.scard("observed_sites").getOrElse(0))
@@ -445,6 +448,22 @@ class ObservedManager extends Actor {
           observed = observed.updated(site, HashSet.empty ++ paths)
       }
 
+    case VisitedSite(site, paths) =>
+      visited.get(site) match {
+        case Some(p) =>
+          visited = visited.updated(site, p++paths)
+        case None =>
+          visited = visited.updated(site, HashSet.empty ++ paths)
+      }
+
+      observed.get(site).foreach { p =>
+        val remaining = p -- paths
+        if(remaining.nonEmpty)
+          observed = observed.updated(site, remaining)
+        else
+          observed = observed - site
+      }
+
     case FlushData() =>
       val currentObserved = observed
       val currentVisited = visited
@@ -490,7 +509,7 @@ class ObservedManager extends Actor {
         val (site, paths) = (t._1, t._2)
         observed = observed - site
         sender ! ObservedSite(site, paths.toSeq)
-        site
+        Logger.info("Returning site %s from memory. %d paths" format (site, paths.size))
       } else {
         // If not, then just check from the disk in future
         val origin = sender
@@ -504,7 +523,9 @@ class ObservedManager extends Actor {
                   try {
                     val paths = Source.fromFile(siteFile(site)).getLines().take(500).toList.distinct
 
-                    Some(ObservedSite(site, paths))
+                    if (paths.nonEmpty)
+                      Some(ObservedSite(site, paths))
+                    else None
                   } catch {
                     case _ => None
                   }
@@ -512,28 +533,13 @@ class ObservedManager extends Actor {
               }
             } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
             msg match {
-              case Some(msg) => origin ! msg
+              case Some(m) => origin ! m
               case None => origin ! NoObservedSites()
             }
           }
         }
       }
 
-    case VisitedSite(site, paths) =>
-      visited.get(site) match {
-        case Some(p) =>
-          visited = visited.updated(site, p++paths)
-        case None =>
-          visited = visited.updated(site, HashSet.empty ++ paths)
-      }
-
-      observed.get(site).foreach { p =>
-        val remaining = p -- paths
-        if(remaining.nonEmpty)
-          observed = observed.updated(site, remaining)
-        else
-          observed = observed - site
-      }
   }
 
   private def writeSiteFile(site : String, paths : Seq[String]) {
@@ -566,7 +572,7 @@ object CrawlManager {
 
   val listener = system.actorOf(Props(new Actor {
     def receive = {
-      case d: DeadLetter => Logger.error(d.toString)
+      case d: DeadLetter => Logger.error(d.toString())
     }
   }))
   system.eventStream.subscribe(listener, classOf[DeadLetter])
