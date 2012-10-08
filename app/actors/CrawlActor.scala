@@ -123,8 +123,10 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   def receive = {
     case LinksFound(urls) =>
       urls foreach ( addUrl(_) )
-      if(active.isEmpty && !stopping)
+      if(active.isEmpty) {
+        Logger.error("Active is empty after adding urls for site "+site)
         notifyCrawlFinished()
+      }
 
     case CrawlResult(url, status, duration, size, links) =>
       pathsCrawled += 1
@@ -409,7 +411,7 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
   }
   def launchSiteActor(site : String, urls : Seq[URL]) {
-    Logger.info("Creating new site actor for "+site)
+    Logger.info("Creating new site actor for %s and seeding it with %d paths" format (site, urls.size))
     val actor = context.actorOf(Props(new SiteActor(site, ttl = Play.configuration.getInt("slurp.site.ttl").getOrElse(300))).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
     actor ! LinksFound(urls)
@@ -431,9 +433,11 @@ class ObservedManager extends Actor {
   var visited = HashMap.empty[String, HashSet[String]]
   var flusher : Option[Cancellable] = None
   case class FlushData()
+  case class FilteredSite(site : String, path : Seq[String])
 
   override def preStart() {
-    context.system.scheduler.schedule(0 seconds, 5 seconds, self, FlushData())
+    val interval : Int = Play.configuration.getInt("slurp.observed.flush-interval").getOrElse(60)
+    context.system.scheduler.schedule(interval seconds, interval seconds, self, FlushData())
   }
   override def postStop() {
     flusher.map (_.cancel())
@@ -441,6 +445,17 @@ class ObservedManager extends Actor {
 
   def receive = {
     case ObservedSite(site, paths) =>
+      val siteKey = "visited:"+site
+
+      implicit val ec : ExecutionContext = context.dispatcher
+
+      Future {
+        redis.withClient { r=>
+         self ! FilteredSite(site, paths.filter(r.zscore(siteKey, _).isEmpty))
+        }
+      }
+
+    case FilteredSite(site, paths) =>
       observed.get(site) match {
         case Some(p) =>
           observed = observed.updated(site, p ++ paths)
@@ -507,9 +522,9 @@ class ObservedManager extends Actor {
       if (observed.nonEmpty) {
         val t = observed.head
         val (site, paths) = (t._1, t._2)
+        Logger.info("Returning site %s from memory. %d paths" format (site, paths.size))
         observed = observed - site
         sender ! ObservedSite(site, paths.toSeq)
-        Logger.info("Returning site %s from memory. %d paths" format (site, paths.size))
       } else {
         // If not, then just check from the disk in future
         val origin = sender
@@ -523,9 +538,10 @@ class ObservedManager extends Actor {
                   try {
                     val paths = Source.fromFile(siteFile(site)).getLines().take(500).toList.distinct
 
-                    if (paths.nonEmpty)
+                    if (paths.nonEmpty) {
+                      Logger.info("Returning site %s from disk. %d paths" format (site, paths.size))
                       Some(ObservedSite(site, paths))
-                    else None
+                    } else None
                   } catch {
                     case _ => None
                   }
@@ -533,7 +549,8 @@ class ObservedManager extends Actor {
               }
             } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
             msg match {
-              case Some(m) => origin ! m
+              case Some(m) =>
+                origin ! m
               case None => origin ! NoObservedSites()
             }
           }
