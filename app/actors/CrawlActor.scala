@@ -17,10 +17,12 @@ import LinkUtility.getPath
 import crawler.Global.redis
 import com.redis.RedisClient
 import akka.dispatch.{Await, Future, ExecutionContext}
-import java.io.{BufferedReader, FileReader, FileWriter, File}
+import java.io._
 import io.Source
 import java.util.UUID
 import akka.util.Timeout
+import scala.Some
+import akka.actor.DeadLetter
 
 /**
  */
@@ -411,63 +413,115 @@ class CrawlManager(val concurrency : Int) extends Actor {
 
 }
 
+
+
 /**
  * Class for managing observed urls
  */
 class ObservedManager extends Actor {
+  val observed = mutable.HashMap.empty[String, HashSet[String]]
+  var flusher : Option[Cancellable] = None
+  case class FlushData()
+
+  override def preStart() {
+    context.system.scheduler.schedule(0 seconds, 5 seconds, self, FlushData())
+  }
+  override def postStop() {
+    flusher.map (_.cancel())
+  }
+
   def receive = {
     case ObservedSite(site, paths) =>
-      writeSiteFile(site, paths)
-      redis.withClient { r =>
-        r.sadd("observed_sites", site)
+      observed.get(site) match {
+        case Some(p) =>
+          observed.put(site, p++paths)
+        case None =>
+          observed.put(site, HashSet.empty ++ paths)
       }
 
-    case RequestSite() =>
-      redis.withClient { r =>
-        var msg : Option[Any] = None
-        do {
-          msg = r.spop("observed_sites") match {
-          case Some(site) =>
-            try {
-              val paths = Source.fromFile(siteFile(site)).getLines().toList.distinct
+    case FlushData() =>
+      val current = observed.empty
 
-              Some(ObservedSite(site, paths))
-            } catch {
-              case _ => None
-            }
-          case None => None
+      implicit val ec : ExecutionContext = context.dispatcher
+
+      Future {
+        current.foreach { t =>
+          val (site, paths) = (t._1, t._2)
+          writeSiteFile(site, paths.toSeq)
+          redis.withClient { r =>
+            r.sadd("observed_sites", site)
+          }
         }
-        } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
-        msg match {
-          case Some(msg) => sender ! msg
-          case None => sender ! NoObservedSites()
+      }
+
+
+    case RequestSite() =>
+      // First check if we have anything in memory
+      if (observed.nonEmpty) {
+        val t = observed.head
+        val (site, paths) = (t._1, t._2)
+        observed.remove(site)
+        sender ! ObservedSite(site, paths.toSeq)
+        site
+      } else {
+        // If not, then just check from the disk in future
+        val origin = sender
+        implicit val ec : ExecutionContext = context.dispatcher
+        Future {
+          redis.withClient { r =>
+            var msg : Option[Any] = None
+            do {
+              msg = r.spop("observed_sites") match {
+                case Some(site) =>
+                  try {
+                    val paths = Source.fromFile(siteFile(site)).getLines().toList.distinct
+
+                    Some(ObservedSite(site, paths))
+                  } catch {
+                    case _ => None
+                  }
+                case None => None
+              }
+            } while(msg.isEmpty && r.scard("observed_sites").getOrElse(0) > 0)
+            msg match {
+              case Some(msg) => origin ! msg
+              case None => origin ! NoObservedSites()
+            }
+          }
         }
       }
 
     case VisitedSite(site, paths) =>
-      val start = System.nanoTime
-      val file = siteFile(site)
-      val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
-      if(file.renameTo(tempFile)) {
-        val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
-        val remaining = observed -- paths
-        if (remaining.nonEmpty)
-          writeSiteFile(site, remaining.toSeq)
-        else
-          redis.withClient { r =>
-            r.srem("observed_sites", site)
-          }
-        tempFile.delete()
+      observed.get(site).foreach { p =>
+        observed.update(site, p -- paths)
       }
-      Logger.info("Compacting %s took %d ms" format (site, System.nanoTime-start/1000/1000))
+
+      implicit val ec : ExecutionContext = context.dispatcher
+      Future {
+        val start = System.nanoTime
+        val file = siteFile(site)
+        val tempFile = siteFile(site+"."+UUID.randomUUID()+".tmp")
+        if(file.renameTo(tempFile)) {
+          val observed = HashSet.empty ++ Source.fromFile(tempFile).getLines()
+          val remaining = observed -- paths
+          if (remaining.nonEmpty)
+            writeSiteFile(site, remaining.toSeq)
+          else
+            redis.withClient { r =>
+              r.srem("observed_sites", site)
+            }
+          tempFile.delete()
+        }
+        Logger.info("Compacting %s took %d ms" format (site, (System.nanoTime-start)/1000/1000))
+
+      }
   }
 
   private def writeSiteFile(site : String, paths : Seq[String]) {
-    val f = new FileWriter(siteFile(site), true)
+    val f = new BufferedWriter(new FileWriter(siteFile(site), true))
     try {
       paths.foreach { path =>
-        f.write(path)
-        f.write("\n")
+        f.write(path+"\n")
       }
     } finally f.close()
 
@@ -487,7 +541,7 @@ object CrawlManager {
   lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
-  lazy val observed = system.actorOf(Props[ObservedManager].withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.io-dispatcher"))
+  lazy val observed = system.actorOf(Props[ObservedManager].withDispatcher("play.akka.actor.io-dispatcher"))
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
