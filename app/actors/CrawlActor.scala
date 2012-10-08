@@ -8,7 +8,7 @@ import akka.util.duration._
 import play.api.{Play, Logger}
 import collection._
 import akka.pattern.ask
-import immutable.HashSet
+import immutable.{HashMap, HashSet}
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
 import java.net.URL
@@ -424,8 +424,8 @@ class CrawlManager(val concurrency : Int) extends Actor {
  * Class for managing observed urls
  */
 class ObservedManager extends Actor {
-  val observed = mutable.HashMap.empty[String, HashSet[String]]
-  val visited = mutable.HashMap.empty[String, HashSet[String]]
+  var observed = HashMap.empty[String, HashSet[String]]
+  var visited = HashMap.empty[String, HashSet[String]]
   var flusher : Option[Cancellable] = None
   case class FlushData()
 
@@ -440,14 +440,16 @@ class ObservedManager extends Actor {
     case ObservedSite(site, paths) =>
       observed.get(site) match {
         case Some(p) =>
-          observed.put(site, p++paths)
+          observed = observed.updated(site, p ++ paths)
         case None =>
-          observed.put(site, HashSet.empty ++ paths)
+          observed = observed.updated(site, HashSet.empty ++ paths)
       }
 
     case FlushData() =>
-      val currentObserved = observed.empty
-      val currentVisited = observed.empty
+      val currentObserved = observed
+      val currentVisited = visited
+      visited = HashMap.empty
+      observed = HashMap.empty
 
       implicit val ec : ExecutionContext = context.dispatcher
 
@@ -486,7 +488,7 @@ class ObservedManager extends Actor {
       if (observed.nonEmpty) {
         val t = observed.head
         val (site, paths) = (t._1, t._2)
-        observed.remove(site)
+        observed = observed - site
         sender ! ObservedSite(site, paths.toSeq)
         site
       } else {
@@ -520,13 +522,17 @@ class ObservedManager extends Actor {
     case VisitedSite(site, paths) =>
       visited.get(site) match {
         case Some(p) =>
-          visited.put(site, p++paths)
+          visited = visited.updated(site, p++paths)
         case None =>
-          visited.put(site, HashSet.empty ++ paths)
+          visited = visited.updated(site, HashSet.empty ++ paths)
       }
 
       observed.get(site).foreach { p =>
-        observed.update(site, p -- paths)
+        val remaining = p -- paths
+        if(remaining.nonEmpty)
+          observed = observed.updated(site, remaining)
+        else
+          observed = observed - site
       }
   }
 
