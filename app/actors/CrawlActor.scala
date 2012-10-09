@@ -53,7 +53,7 @@ case class ObservedSite(site : String, paths : Seq[String])
 case class NoObservedSites()
 
 case class ManagerStatisticsRequest()
-case class ManagerStatistics(activeSites : Int, pendingSites : Int)
+case class ManagerStatistics(activeSites : Int, pendingSites : Int, bufferSize : Int)
 
 case class Stop()
 
@@ -259,6 +259,7 @@ class CrawlStatisticsActor extends Actor {
   var redirect = 0
   var totalSites = 0
   var pendingSites = 0
+  var bufferSize = 0
   var duration : Long = 0
   var bytes : Long = 0
   val start = System.nanoTime()
@@ -305,7 +306,7 @@ class CrawlStatisticsActor extends Actor {
       listeners.foreach(_.push(statsHtml))
       lastStats = CrawlStatistics(total, success, failed, ignored, timeout, redirect, duration, System.nanoTime(), bytes)
 
-    case ManagerStatistics(t, p) => totalSites = t; pendingSites = p
+    case ManagerStatistics(t, p, b) => totalSites = t; pendingSites = p; bufferSize = p
 
     case Listen() =>
       lazy val channel: PushEnumerator[String] = Enumerator.imperative[String](
@@ -327,7 +328,7 @@ class CrawlStatisticsActor extends Actor {
     val bytesInPeriod = bytes-lastStats.bytes
     val durationInPeriod = duration-lastStats.duration
     "<pre>" +
-      ("total sites: active %d, pending %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, running for %.2fs kB %.2f\n" format (totalSites, pendingSites, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
+      ("total sites: active %d, pending %d, in buffer %d\ncrawls: total %d, success %d, failure %d, ignored %d, redirect %d, timeout %d, running for %.2fs kB %.2f\n" format (totalSites, pendingSites, bufferSize, total, success, failed, ignored, redirect, timeout, fromStart, bytes/1024.0)) +
       ("from start:  total %.2f 1/s, %.2f kBs, avg response %.2fms, avg page size %.2fkB\n" format (total/fromStart, bytes/fromStart/1024.0, if(total != 0) duration/total/1000000.0 else 0.0, if(total !=0) 1.0*bytes/total else 0.0)) +
       ("last period: total %.2f 1/s, %.2f kBs, avg response %.2fms, avg page size %.2fkB\n" format (crawlsInPeriod/fromLast, bytesInPeriod/fromLast/1024.0, if(crawlsInPeriod!=0) durationInPeriod/crawlsInPeriod/1000000.0 else 0.0, if (crawlsInPeriod!=0) 1.0*bytesInPeriod/crawlsInPeriod else 0.0)) +
     "</pre>"
@@ -345,7 +346,12 @@ class CrawlManager(val concurrency : Int) extends Actor {
   lazy val redisClient : RedisClient = redis.pool.borrowObject().asInstanceOf[RedisClient]
   implicit val timeout = Timeout(5000)
 
+  val siteBuffer = mutable.ListBuffer.empty[ObservedSite]
+  val siteBufferFillThreshold = concurrency/2
+
   var cancelAfterStop = List.empty[Cancellable]
+
+  case class FillBuffer()
 
   override def postStop() {
     redis.pool.returnObject(redisClient)
@@ -353,14 +359,16 @@ class CrawlManager(val concurrency : Int) extends Actor {
   }
 
   override def preStart() {
-    cancelAfterStop = cancelAfterStop :+ context.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
+    cancelAfterStop = cancelAfterStop :+ context.system.scheduler.schedule(0 seconds, 1 seconds, self, FillBuffer())
   }
 
 
   def receive = {
-    case "tick" =>
-      if(active.size < concurrency)
-        CrawlManager.observed ! RequestSite()
+    case FillBuffer() =>
+      if (siteBuffer.size < siteBufferFillThreshold)
+        (0 until math.min(siteBufferFillThreshold/3, siteBufferFillThreshold-siteBuffer.size)) foreach { ignored =>
+          CrawlManager.observed ! RequestSite()
+        }
 
     case LinksFound(urls) =>
       registerLink(urls)
@@ -376,30 +384,40 @@ class CrawlManager(val concurrency : Int) extends Actor {
         Logger.info("Site "+site+" was in list of active crawls")
         active.remove(site) map { actor =>
           Logger.info("Trying to find new site to crawl")
+          if (siteBuffer.nonEmpty) {
+            val s = siteBuffer.remove(0)
+            if (!active.contains(site))
+              launchSiteActor(site, s.paths.flatMap { path =>
+                try {
+                  Some(new URL(site+path))
+                } catch {
+                  case _ => None
+                }
+              }.toSeq)
+          }
           CrawlManager.observed ! RequestSite()
         }
       }
 
-    case ObservedSite(newSite, paths) =>
-      if (active.size<concurrency)
-        if (! active.contains(newSite)) {
-          launchSiteActor(newSite, paths.flatMap { path =>
+    case s @ ObservedSite(site, paths) =>
+      if (active.size<concurrency) {
+        if (! active.contains(site)) {
+          launchSiteActor(site, paths.flatMap { path =>
             try {
-              Some(new URL(newSite+path))
+              Some(new URL(site+path))
             } catch {
               case _ => None
             }
           }.toSeq)
         }
-
-      if (active.size<concurrency)
-        CrawlManager.observed ! RequestSite()
+      } else
+        siteBuffer += s
 
     case NoObservedSites() =>
 
     case ManagerStatisticsRequest() =>
       Logger.info("Responding to ManagerStatisticsRequest")
-      sender ! ManagerStatistics(active.size, redisClient.scard("observed_sites").getOrElse(0))
+      sender ! ManagerStatistics(active.size, redisClient.scard("observed_sites").getOrElse(0), siteBuffer.size)
 
     case msg @ _ => Logger.warn("Unknown message! "+msg)
 
