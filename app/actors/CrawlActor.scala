@@ -265,7 +265,17 @@ class CrawlStatisticsActor extends Actor {
   var listeners = Seq.empty[PushEnumerator[String]]
   var lastStats = CrawlStatistics(0,0,0,0, 0,0, 0, System.nanoTime(),0)
 
-  Akka.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
+  var cancelAfterStop = List.empty[Cancellable]
+
+  override def preStart() {
+    cancelAfterStop = cancelAfterStop :+ context.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
+    cancelAfterStop = cancelAfterStop :+ context.system.scheduler.schedule(0 seconds, 5 seconds, self, CrawlStatisticsRequest())
+  }
+
+  override def postStop() {
+    cancelAfterStop.foreach (_.cancel())
+  }
+
 
   def receive = {
     case "tick" =>
@@ -335,11 +345,23 @@ class CrawlManager(val concurrency : Int) extends Actor {
   lazy val redisClient : RedisClient = redis.pool.borrowObject().asInstanceOf[RedisClient]
   implicit val timeout = Timeout(5000)
 
+  var cancelAfterStop = List.empty[Cancellable]
+
   override def postStop() {
     redis.pool.returnObject(redisClient)
+    cancelAfterStop.foreach (_.cancel())
   }
 
+  override def preStart() {
+    cancelAfterStop = cancelAfterStop :+ context.system.scheduler.schedule(0 seconds, 1 seconds, self, "tick")
+  }
+
+
   def receive = {
+    case "tick" =>
+      if(active.size < concurrency)
+        CrawlManager.observed ! RequestSite()
+
     case LinksFound(urls) =>
       registerLink(urls)
 
@@ -391,16 +413,12 @@ class CrawlManager(val concurrency : Int) extends Actor {
         case Some(actor) =>
           actor ! LinksFound(siteUrls)
         case None =>
-          if (active.size < concurrency) {
-            launchSiteActor(site , siteUrls)
-          } else {
-            CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
-          }
+          CrawlManager.observed ! ObservedSite(site, siteUrls map {getPath(_)})
       }
     }
 
   }
-  def launchSiteActor(site : String, urls : Seq[URL]) {
+  private def launchSiteActor(site : String, urls : Seq[URL]) {
     Logger.info("Creating new site actor for %s and seeding it with %d paths" format (site, urls.size))
     val actor = context.actorOf(Props(new SiteActor(site, ttl = Play.configuration.getInt("slurp.site.ttl").getOrElse(300))).withDispatcher("play.akka.actor.site-dispatcher"))
     active.put(site, actor)
@@ -458,7 +476,7 @@ class SiteManager extends Actor {
     context.system.scheduler.schedule(interval seconds, interval seconds, self, FlushData())
   }
   override def postStop() {
-    flusher.map (_.cancel())
+    flusher.foreach (_.cancel())
   }
 
   def receive = {
@@ -560,6 +578,7 @@ class SiteManager extends Actor {
 
                     if (paths.nonEmpty) {
                       Logger.info("Returning site %s from disk. %d paths" format (site, paths.size))
+                      r.sadd("observed_sites", site)
                       Some(ObservedSite(site, paths))
                     } else None
                   } catch {
@@ -605,7 +624,6 @@ object CrawlManager {
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
   lazy val observed = system.actorOf(Props[SiteManager].withDispatcher("play.akka.actor.io-dispatcher"))
 
-  Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
   val listener = system.actorOf(Props(new Actor {
     def receive = {
