@@ -7,7 +7,6 @@ import play.api.Play.current
 import akka.util.duration._
 import play.api.{Play, Logger}
 import collection._
-import akka.pattern.ask
 import immutable.{HashMap, HashSet}
 import play.api.libs.iteratee._
 import akka.routing.{RoundRobinRouter, SmallestMailboxRouter}
@@ -23,6 +22,9 @@ import java.util.UUID
 import akka.util.Timeout
 import scala.Some
 import akka.actor.DeadLetter
+import play.api.cache.EhCachePlugin
+import net.sf.ehcache.Cache
+import net.sf.ehcache.config.CacheConfiguration
 
 /**
  */
@@ -117,12 +119,12 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   var pathsCrawled = 0
   var stopping = false
   var notified = false
-  lazy val robots : RobotsExclusion = fetchRobots()
+  lazy val robots : RobotsExclusion = SiteManager.retrieveRobotsExclusion(site)
   val deadLine = System.currentTimeMillis()+ttl*1000
 
   def receive = {
     case LinksFound(urls) =>
-      urls foreach ( addUrl(_) )
+      addPaths(urls map {getPath(_)})
       if(active.isEmpty) {
         Logger.error("Active is empty after adding urls for site "+site)
         notifyCrawlFinished()
@@ -144,7 +146,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       }
       visited = visited + (getPath(url) -> time)
 
-      val (local, other) = links.distinct.partition(site equals LinkUtility.baseUrl(_))
+      val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
 
       if(other.nonEmpty) context.parent ! LinksFound(other)
 
@@ -221,16 +223,6 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
     context.stop(self)
   }
 
-  def fetchRobots() : RobotsExclusion = {
-    val url = site + "/robots.txt"
-    try {
-      RobotsExclusion(WS.url(url).get().await(5000).get.body, "Slurp")
-    } catch {
-      case _ =>
-        new RobotsExclusion(Seq.empty)
-    }
-  }
-
   def shouldCrawl(path : String) : Boolean = {
     !active.contains(path) && robots.allow(path) && ! visited.contains(path)
   }
@@ -243,12 +235,10 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   }
 
   /**
-   * Add url for processing
-   * @return Whether url was accepted
+   * Add path for processing either launching it immediately or adding it to pending paths
    */
-  def addUrl(url: URL) {
-    val path = getPath(url)
-    if (shouldCrawl(path)) {
+  def addPaths(paths: Seq[String]) {
+    paths.filter(shouldCrawl _).foreach { path =>
       if (active.size < concurrency && System.currentTimeMillis < deadLine) {
         launchCrawl(path)
       } else {
@@ -424,11 +414,39 @@ class CrawlManager(val concurrency : Int) extends Actor {
 }
 
 
+object SiteManager {
+  lazy val robotsCache = {
+    val cache = new Cache(new CacheConfiguration("robots", 500))
+    Play.current.plugin[EhCachePlugin].get.manager.addCache(cache)
+    cache
+  }
+
+  def retrieveRobotsExclusion(site : String) : RobotsExclusion = {
+    val robots = robotsCache.get(site)
+    if(robots == null) {
+      val url = site + "/robots.txt"
+
+      val r = try {
+        val ro = RobotsExclusion(WS.url(url).get().await(5000).get.body, "Slurp")
+        Logger.info("Retrieved real robots.txt for "+site)
+        ro
+      } catch {
+        case _ =>
+          new RobotsExclusion(Seq.empty)
+      }
+      robotsCache.put(new net.sf.ehcache.Element(site, r))
+      r
+    } else {
+      Logger.info("Retrieved robots.txt from cache for "+site)
+      robots.getObjectValue.asInstanceOf[RobotsExclusion]
+    }
+  }
+}
 
 /**
  * Class for managing observed urls
  */
-class ObservedManager extends Actor {
+class SiteManager extends Actor {
   var observed = HashMap.empty[String, HashSet[String]]
   var visited = HashMap.empty[String, HashSet[String]]
   var flusher : Option[Cancellable] = None
@@ -573,7 +591,7 @@ class ObservedManager extends Actor {
   private def siteFile(site : String) = new File("sites", site.replaceAll("//", ""))
 
   override def preRestart(reason : Throwable , message : Option[Any]) {
-    Logger.error("ObservedManager got restarted due %s with message %s" format(reason, message))
+    Logger.error("SiteManager got restarted due %s with message %s" format(reason, message))
     super.preRestart(reason,message)
   }
 
@@ -585,7 +603,7 @@ object CrawlManager {
   lazy val ref = system.actorOf(Props(new CrawlManager(Play.configuration.getInt("slurp.parallel.sites").getOrElse(100))).withDispatcher("play.akka.actor.manager-dispatcher"), name="manager")
   lazy val statistics = system.actorOf(Props[CrawlStatisticsActor].withDispatcher("play.akka.actor.statistics-dispatcher"), "statistics")
   lazy val crawler = system.actorOf(Props(new CrawlActor(statistics)).withRouter(new SmallestMailboxRouter(2*Runtime.getRuntime.availableProcessors)).withDispatcher("play.akka.actor.crawler-dispatcher"), "crawler")
-  lazy val observed = system.actorOf(Props[ObservedManager].withDispatcher("play.akka.actor.io-dispatcher"))
+  lazy val observed = system.actorOf(Props[SiteManager].withDispatcher("play.akka.actor.io-dispatcher"))
 
   Akka.system.scheduler.schedule(0 seconds, 5 seconds, statistics, CrawlStatisticsRequest())
 
