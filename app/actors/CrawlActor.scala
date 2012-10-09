@@ -224,7 +224,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   }
 
   def shouldCrawl(path : String) : Boolean = {
-    !active.contains(path) && robots.allow(path) && ! visited.contains(path)
+    !active.contains(path) && ! visited.contains(path) && robots.allow(path)
   }
 
   def launchCrawl(path : String) {
