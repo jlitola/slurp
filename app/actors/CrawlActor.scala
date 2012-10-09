@@ -288,7 +288,7 @@ class CrawlStatisticsActor extends Actor {
       duration += d
       status match {
         case CrawlHttpStatus(200 | 202 | 204) => success += 1
-        case CrawlHttpStatus(301 | 302) =>
+        case CrawlHttpStatus(301 | 302 | 303) =>
           Logger.debug("url "+url+" is redirected to "+links)
           redirect += 1
         case CrawlHttpStatus(st) if st >= 400 =>
@@ -306,7 +306,7 @@ class CrawlStatisticsActor extends Actor {
       listeners.foreach(_.push(statsHtml))
       lastStats = CrawlStatistics(total, success, failed, ignored, timeout, redirect, duration, System.nanoTime(), bytes)
 
-    case ManagerStatistics(t, p, b) => totalSites = t; pendingSites = p; bufferSize = p
+    case ManagerStatistics(t, p, b) => totalSites = t; pendingSites = p; bufferSize = b
 
     case Listen() =>
       lazy val channel: PushEnumerator[String] = Enumerator.imperative[String](
@@ -386,10 +386,10 @@ class CrawlManager(val concurrency : Int) extends Actor {
           Logger.info("Trying to find new site to crawl")
           if (siteBuffer.nonEmpty) {
             val s = siteBuffer.remove(0)
-            if (!active.contains(site))
-              launchSiteActor(site, s.paths.flatMap { path =>
+            if (!active.contains(s.site))
+              launchSiteActor(s.site, s.paths.flatMap { path =>
                 try {
-                  Some(new URL(site+path))
+                  Some(new URL(s.site+path))
                 } catch {
                   case _ => None
                 }
