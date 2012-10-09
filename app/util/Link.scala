@@ -13,7 +13,7 @@ object LinkUtility {
   val LinkPattern = """(?s)(<a.*?>)""".r
   val NoFollow = """.*\brel=['"]?nofollow['"]?.*""".r
   val HRef = """.*\bhref\s*=\s*(?:"([^"\s]+)"|'([^'\s]+)'|([^"'\s]+)).*""".r
-  val ValidURL = """[\w\d:#@%/;$()~_?\+-=\\\.&]*""".r
+  val ValidURL = """[\w\d:#@%/;$()~_?\+-=\\\.&]+""".r
   val Anchor = """#.*""".r
 
   def getPath(url : URL ) = {
@@ -73,20 +73,25 @@ object LinkUtility {
       throw new UnsupportedContentType(t)
     }
     val byteToLine = new Object() {
-      var remaining = ""
+      var remaining = new StringBuilder
       var size = 0
-      def apply(bytes: Array[Byte]) : Seq[String] = {
+      def apply(bytes: Array[Byte]) : String = {
         size+=bytes.size
-        val lines = (remaining + new String(bytes)).split("\n")
-        remaining = lines.last
-        lines.dropRight(1)
+        remaining.append(new String(bytes))
+        val i = remaining.lastIndexOf("\n")
+        if(i != -1) {
+          val block = remaining.substring(0, i)
+          remaining.delete(0,i)
+          block
+        } else
+          ""
       }
     }
     Enumeratee.map[Array[Byte]] { byteToLine(_) } &>>
-      Iteratee.fold[Seq[String], ResponseDetails](ResponseDetails(r, 0, Seq.empty)) {
+      Iteratee.fold[String, ResponseDetails](ResponseDetails(r, 0, Seq.empty)) {
         (details, lines) =>
           details.copy(
-            links = details.links ++ (lines flatMap (findLinks(_, Some(url)))),
+            links = details.links ++ findLinks(lines, Some(url)),
             size = byteToLine.size
           )
       }

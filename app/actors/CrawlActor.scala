@@ -144,7 +144,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       }
       visited = visited + (getPath(url) -> time)
 
-      val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
+      val (local, other) = links.distinct.partition(site equals LinkUtility.baseUrl(_))
 
       if(other.nonEmpty) context.parent ! LinksFound(other)
 
