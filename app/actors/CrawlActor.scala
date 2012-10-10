@@ -119,6 +119,7 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
   var pathsCrawled = 0
   var stopping = false
   var notified = false
+  var serverBusy = false
   lazy val robots : RobotsExclusion = SiteManager.retrieveRobotsExclusion(site)
   val deadLine = System.currentTimeMillis()+ttl*1000
 
@@ -136,23 +137,27 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
       active = active.filterNot(_ equals path)
       val time = System.currentTimeMillis
 
-      implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.io-dispatcher")
+      if (status == 429 || status == 503) { // Server is busy or asks us to slow down
+        serverBusy = true
+      } else {
+        implicit val ec : ExecutionContext = Akka.system.dispatchers.lookup("play.akka.actor.io-dispatcher")
 
-      Future {
-        redis.withClient {
-          implicit r =>
-            r.zadd("visited:" + site, time, path)
+        Future {
+          redis.withClient {
+            implicit r =>
+              r.zadd("visited:" + site, time, path)
+          }
         }
+        visited = visited + (getPath(url) -> time)
+
+        val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
+
+        if(other.nonEmpty) context.parent ! LinksFound(other)
+
+        pending ++= local.map(getPath(_)).filterNot( visited.contains( _ ) )
       }
-      visited = visited + (getPath(url) -> time)
 
-      val (local, other) = links.partition(site equals LinkUtility.baseUrl(_))
-
-      if(other.nonEmpty) context.parent ! LinksFound(other)
-
-      pending ++= local.map(getPath(_)).filterNot( visited.contains( _ ) )
-
-      if(System.currentTimeMillis < deadLine) {
+      if(!shouldYield()) {
         var done = false
         while(!done && pending.nonEmpty) {
           val path = pending.head
@@ -225,6 +230,10 @@ class SiteActor(val site : String, val concurrency : Int = 2, val ttl : Int) ext
 
   def shouldCrawl(path : String) : Boolean = {
     !active.contains(path) && ! visited.contains(path) && robots.allow(path)
+  }
+
+  def shouldYield() : Boolean = {
+    serverBusy || deadLine >= System.currentTimeMillis
   }
 
   def launchCrawl(path : String) {
